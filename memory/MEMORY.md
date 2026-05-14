@@ -1,0 +1,15 @@
+# SuperBizAgent — 活跃记忆索引 (MEMORY.md)
+
+> Hot 层：由系统自动维护，供 Planner / RAG 每轮加载。每条含简短摘要 + 指向 Cold 完整报告的链接。
+> 手动编辑时请保持表格为单行单元格（摘要列勿换行）。
+
+## 最近诊断索引
+
+| 时间 | 会话 ID | 摘要 | 报告 |
+|------|---------|------|------|
+| 2026-05-10 14:14 | alert_3d900e6bdf6d | 当前主机 [zhangjunjie] 发生了一条 [CRITICAL] 级别告警： 告警名称: CCDs Max (Tdie) High 指标: tempera — ---   项目   内容    ------ ------    **告警名称**   CCDs Max (Tdie) High     **告警级别**   🔴 **CRITICAL**     **主机**   zhangjunjie     **指标**   te… | [20260510_141442_alert_3d900e6bdf6d.md](memory\incidents\20260510_141442_alert_3d900e6bdf6d.md) |
+
+## 目录说明
+
+- `incidents/` — Cold：完整诊断报告（自动写入）
+- `artifacts/` — Microcompact 工具结果落盘（自动写入，非诊断正文）
