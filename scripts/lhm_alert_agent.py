@@ -101,6 +101,105 @@ def fetch_temperature(name_contains: str) -> Optional[dict]:
     return results[0]
 
 
+# ── 心跳上报 ────────────────────────────────────────────────────────────
+
+HOST_NAME = socket.gethostname()
+EMERGENCY_SNAPSHOT_DIR = Path(__file__).resolve().parents[1] / "memory" / "emergency"
+
+_last_heartbeat_ok = True
+_last_snapshot_temp = 0.0  # 避免短时间内重复写快照
+
+# 温度达到此值触发紧急快照（死前留证）
+EMERGENCY_SNAPSHOT_TEMP_C = float(os.getenv("EMERGENCY_SNAPSHOT_TEMP_C", "85"))
+
+
+def _collect_critical_snapshot(temp: float, recent_points: list) -> dict:
+    """在温度危险时采集系统快照——死前最后一口气留点证据。
+    即使 psutil 不可用（边缘 Agent 是可选的），也至少返回温度数据。
+    """
+    snapshot: dict = {
+        "temperature": temp,
+        "recent_points": recent_points[-10:],
+        "timestamp": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+    }
+    try:
+        import psutil
+        snapshot["cpu_percent"] = round(psutil.cpu_percent(interval=0.5), 1)
+        vm = psutil.virtual_memory()
+        snapshot["memory_percent"] = round(vm.percent, 1)
+        top_procs = []
+        for proc in sorted(
+            psutil.process_iter(["name", "cpu_percent"]),
+            key=lambda p: p.info["cpu_percent"] or 0,
+            reverse=True,
+        )[:5]:
+            try:
+                top_procs.append({
+                    "name": proc.info["name"],
+                    "cpu": proc.info["cpu_percent"] or 0,
+                })
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        snapshot["top_processes"] = top_procs
+    except ImportError:
+        pass  # 边缘 Agent 不强依赖 psutil
+    return snapshot
+
+
+def _write_emergency_snapshot(snapshot: dict) -> None:
+    """死前快照落盘——就算机子挂了，重启回来还能看到。"""
+    global _last_snapshot_temp
+    temp = snapshot.get("temperature", 0)
+    # 温度变化小于 2°C 不重复写，减少磁盘 IO
+    if abs(temp - _last_snapshot_temp) < 2.0:
+        return
+    _last_snapshot_temp = temp
+    try:
+        EMERGENCY_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        path = EMERGENCY_SNAPSHOT_DIR / "last_breath.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+        print(f"\n[EMERGENCY] 紧急快照已落盘: {path} (温度 {temp}°C)")
+    except OSError as exc:
+        print(f"\n[WARN] 紧急快照写入失败: {exc}")
+
+
+def send_heartbeat(temp: float | None, recent_points: list) -> bool:
+    """每个轮询周期向云端上报心跳 + 当前系统状态。
+
+    temp=None 表示 LHM 不可达。云端通过心跳中断判定主机失联，
+    并通过最后一条心跳的系统状态推断死因。
+    """
+    global _last_heartbeat_ok
+    url = f"{FASTAPI_BASE_URL}/api/heartbeat"
+    headers = {"Authorization": f"Bearer {ALERT_WEBHOOK_TOKEN}"}
+    payload: dict = {"host": HOST_NAME}
+
+    if temp is not None:
+        payload["temperature"] = round(temp, 1)
+        payload["temp_threshold"] = ONCALL_TEMP_THRESHOLD_C
+        payload["recent_points"] = recent_points[-10:]
+
+    # 温度危险时采集完整快照（死前遗书）
+    if temp is not None and temp >= EMERGENCY_SNAPSHOT_TEMP_C:
+        snapshot = _collect_critical_snapshot(temp, recent_points)
+        payload["critical_snapshot"] = snapshot
+        _write_emergency_snapshot(snapshot)
+
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=5)
+        resp.raise_for_status()
+        if not _last_heartbeat_ok:
+            print(f"[OK] 心跳恢复")
+        _last_heartbeat_ok = True
+        return True
+    except requests.RequestException as exc:
+        if _last_heartbeat_ok:
+            print(f"[WARN] 心跳发送失败: {exc}")
+        _last_heartbeat_ok = False
+        return False
+
+
 # ── Webhook 上报 ──────────────────────────────────────────────────────────
 
 def send_webhook(sensor: dict, value: float, recent_points: list) -> bool:
@@ -108,7 +207,7 @@ def send_webhook(sensor: dict, value: float, recent_points: list) -> bool:
     ts = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     payload = {
         "source": "librehardwaremonitor",
-        "host": socket.gethostname(),
+        "host": HOST_NAME,
         "severity": "critical" if value >= ONCALL_TEMP_THRESHOLD_C + 5 else "warning",
         "alert_name": f"{sensor['name']} High",
         "metric": "temperature_c",
@@ -151,7 +250,12 @@ def main() -> None:
     recent_points: list = []               # 最近数据点 [(时间字符串, 值), ...]
 
     while True:
+        # 1. 读取温度传感器
         sensor = fetch_temperature(LHM_SENSOR_NAME_CONTAINS)
+
+        # 2. 发送心跳（带上当前温度，供云端死因分析）
+        current_temp = sensor["value"] if sensor else None
+        send_heartbeat(current_temp, recent_points)
 
         if sensor is None:
             print(f"[WARN] 未找到传感器 '{LHM_SENSOR_NAME_CONTAINS}'，LHM 是否已启动？")

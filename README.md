@@ -11,11 +11,11 @@
 - 🤖 **智能对话** — LangChain 多轮对话 + 流式输出（RAG Agent 状态图，历史过长时 Snip 截断）
 - 📚 **RAG 问答** — 文档切分、向量入库（Milvus）、`retrieve_knowledge` 工具按需检索（Agentic RAG）
 - 🔧 **AIOps 诊断** — LangGraph：`planner → executor → microcompact → replanner` 循环，支持大工具结果落盘与步骤折叠
-- 🔔 **主动 OnCall（可选）** — `scripts/lhm_alert_agent.py` 轮询 LibreHardwareMonitor，超阈经 `POST /api/alerts/ingest` 上报；邮件通知；`critical` 可触发自动诊断
+- 🔔 **主动 OnCall（可选）** — `scripts/lhm_alert_agent.py` 轮询 LibreHardwareMonitor，超阈经 `POST /api/alerts/ingest` 上报；邮件通知；`critical` 可触发自动诊断；**心跳监控**：主机失联后云端自动判定死因<br/>
 - 🧠 **分层记忆** — `memory/MEMORY.md` 热索引 + `memory/incidents/` 完整报告 + `memory/artifacts/` Microcompact 原文
 - 📋 **Skill** — `.claude/skills/*.md`（frontmatter + 排查步骤），经 `app/claude_skills/reader.py` 注入 Planner
 - 🌐 **Web 界面** — 静态页：快速问答 / 流式对话 / 智能运维
-- 🔌 **MCP** — 当前主进程默认接入 **Monitor MCP**（`streamable-http`）；Makefile 另提供 **CLS MCP** 启动目标（需自行接入客户端配置）
+- 🔌 **MCP** — 当前主进程默认接入 **Monitor MCP**（`streamable-http`）；**支持多 Server 动态注册**（monitor + CLS + 远程），改 `.env` 即刻生效；Makefile 另提供 **CLS MCP** 启动目标
 
 ## 🛠️ 技术栈
 
@@ -32,6 +32,11 @@
 
 ```
 告警轮询 (lhm_alert_agent) ──Webhook──► AlertService ──邮件──► 运维
+                              │
+                              ├── 心跳 (每 5s) ──► AlertService 心跳监控
+                              │   ├── 正常: 记录温度 + 走势
+                              │   ├── 危险 (≥85°C): 采集 CPU/内存/进程快照 + 落盘
+                              │   └── 失联 (60s): 取最后快照推断死因 → 邮件
                               │
                               └─ critical + oncall_auto_diagnosis ──► AIOps (LangGraph)
                                                                             │
@@ -80,7 +85,7 @@ make init    # Docker + 启动 MCP + API + 上传 aiops-docs（依 Makefile 定�
 
 停止：`.\stop-windows.bat`
 
-> **说明**：当前 `app/config.py` 中 MCP 仅注册 **monitor**；若需 **CLS 日志 MCP**，可执行 `make start-cls`（Linux/macOS）并自行扩展 `config.mcp_servers` 与客户端加载逻辑。
+> **说明**：当前 `app/config.py` 中 MCP 支持 **多 Server 动态注册**（monitor / cls / remote），只需在 `.env` 中配置 URL 即可。若需 **CLS 日志 MCP**，可执行 `make start-cls`（Linux/macOS）并配置 `MCP_CLS_URL`。
 
 ### 访问
 
@@ -104,6 +109,7 @@ make init    # Docker + 启动 MCP + API + 上传 aiops-docs（依 Makefile 定�
 | 告警上报 | POST | `/api/alerts/ingest` | Bearer `ALERT_WEBHOOK_TOKEN` |
 | 活跃告警 | GET | `/api/alerts/active` | 内存中的 active 列表 |
 | 解决告警 | POST | `/api/alerts/{alert_id}/resolve` | 标记 resolved |
+| 心跳上报 | POST | `/api/heartbeat` | 边缘 Agent 心跳 + 系统快照，失联时用于死因分析 |
 
 ### 调用示例
 
@@ -126,17 +132,17 @@ curl -X POST "http://localhost:9900/api/aiops" \
 super_biz_agent_py/
 ├── app/
 │   ├── main.py                 # FastAPI 入口、路由挂载、Milvus 生命周期
-│   ├── config.py               # Pydantic Settings（LLM/Milvus/RAG/MCP/SMTP/告警/LHM）
+│   ├── config.py               # Pydantic Settings（LLM/Milvus/RAG/多MCP/SMTP/告警/LHM/心跳）
 │   ├── api/
 │   │   ├── chat.py             # /api/chat, chat_stream, chat/clear
 │   │   ├── aiops.py            # /api/aiops（SSE）
-│   │   ├── alerts.py           # /api/alerts/*（Webhook、列表、resolve）
+│   │   ├── alerts.py           # /api/alerts/* + /api/heartbeat（心跳+死因分析）
 │   │   ├── file.py             # /api/upload
 │   │   └── health.py           # /health
 │   ├── services/
 │   │   ├── rag_agent_service.py
 │   │   ├── aiops_service.py    # LangGraph 编译与 execute 流
-│   │   ├── alert_service.py
+│   │   ├── alert_service.py    # 告警 + 心跳监控 + 死因分析
 │   │   ├── mail_service.py
 │   │   ├── vector_*.py, document_splitter_service.py
 │   ├── agent/
@@ -154,13 +160,13 @@ super_biz_agent_py/
 │   ├── core/                   # llm_factory, milvus_client
 │   └── utils/                  # logger, token_meter
 ├── .claude/skills/             # Markdown Skill（id/name/description + 正文）
-├── memory/                     # 运行期生成：MEMORY.md, incidents/, artifacts/
+├── memory/                     # 运行期生成：MEMORY.md, incidents/, artifacts/, emergency/
 ├── mcp_servers/
 │   ├── monitor_server.py       # CPU/内存/LHM 等（默认接入）
 │   ├── cls_server.py           # 可选：CLS 日志 MCP
 │   └── README.md
 ├── scripts/
-│   └── lhm_alert_agent.py      # 主动轮询 + Webhook 上报
+│   └── lhm_alert_agent.py      # 轮询 + Webhook + 心跳 + 死前快照
 ├── static/                     # 前端静态资源
 ├── aiops-docs/                 # 默认运维知识 Markdown
 ├── vector-database.yml         # Milvus Compose
@@ -192,9 +198,15 @@ RAG_TOP_K=3
 CHUNK_MAX_SIZE=800
 CHUNK_OVERLAP=100
 
-# ── MCP Monitor ─────────────────────────────────────────
+# ── MCP（多 Server 动态注册）────────────────────────────────
+# 每个 Server 独立 transport + url，填 URL 即注册
 MCP_MONITOR_TRANSPORT=streamable-http
 MCP_MONITOR_URL=http://localhost:8004/mcp
+MCP_CLS_TRANSPORT=streamable-http
+MCP_CLS_URL=http://localhost:8003/mcp
+# 通用远程 MCP（留空不注册，填入公网 URL 即刻生效）
+MCP_REMOTE_TRANSPORT=streamable-http
+MCP_REMOTE_URL=
 
 # ── 告警 Webhook（ingest 接口 Bearer）──────────────────
 ALERT_WEBHOOK_TOKEN=
@@ -214,6 +226,10 @@ ONCALL_TEMP_THRESHOLD_C=50
 ONCALL_TEMP_DURATION_SEC=60
 ONCALL_TEMP_COOLDOWN_SEC=120
 ONCALL_AUTO_DIAGNOSIS=true
+# 心跳监控（边缘 → 云端）
+ONCALL_HEARTBEAT_TIMEOUT_SEC=60
+FASTAPI_BASE_URL=http://127.0.0.1:9900
+EMERGENCY_SNAPSHOT_TEMP_C=85
 ```
 
 ## 🎯 AIOps 智能运维

@@ -1,4 +1,4 @@
-"""告警接收与查询接口"""
+"""告警接收、心跳监控与查询接口"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, Field
 
 from app.config import config
 from app.models.alert import AlertIngestRequest, AlertIngestResponse, AlertRecord
@@ -83,3 +84,30 @@ async def resolve_alert(alert_id: str) -> AlertRecord:
             detail=f"未找到告警 {alert_id}",
         )
     return record
+
+
+class HeartbeatRequest(BaseModel):
+    """边缘 Agent 心跳上报请求体——携带系统状态供死因分析"""
+    host: str = Field(description="主机名，用于标识上报来源")
+    temperature: float | None = Field(default=None, description="当前温度 (°C)")
+    temp_threshold: float | None = Field(default=None, description="告警阈值 (°C)")
+    recent_points: list = Field(default_factory=list, description="最近温度数据点 [[ts, val], ...]")
+    critical_snapshot: dict | None = Field(default=None, description="温度危险时的系统快照 (CPU/内存/进程)")
+
+
+@router.post(
+    "/heartbeat",
+    summary="边缘 Agent 心跳上报（含系统快照供死因分析）",
+    dependencies=[Depends(_verify_token)],
+)
+async def heartbeat(req: HeartbeatRequest) -> dict:
+    """边缘 Agent 定期调用此接口告知云端"我还活着"。
+
+    - 云端记录每个主机的最近心跳时间和系统快照
+    - 超过 oncall_heartbeat_timeout_sec 秒未收到心跳 → 自动宕机告警
+    - 宕机告警会包含最后心跳的温度/CPU/进程数据，用于推断死因
+    - 心跳恢复后自动 resolve 宕机告警
+    """
+    snapshot = req.model_dump(exclude={"host"})
+    alert_service.record_heartbeat(req.host, snapshot)
+    return {"status": "ok", "host": req.host}
