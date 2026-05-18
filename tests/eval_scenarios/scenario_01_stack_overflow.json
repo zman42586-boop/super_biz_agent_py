@@ -1,0 +1,40 @@
+{
+  "id": "scenario_01_stack_overflow",
+  "name": "MATLAB 栈溢出崩溃",
+  "description": "test_stack_overflow.m 无限递归，MATLAB 栈溢出后进程退出",
+  "alert": {
+    "host": "simulation-pc",
+    "severity": "critical",
+    "alert_name": "MATLAB.exe 异常退出: test_stack_overflow at line 5",
+    "metric": "process_exit",
+    "value": 0,
+    "threshold": 1,
+    "duration_sec": 0,
+    "sensor_id": "MATLAB.exe",
+    "ts": "2026-05-18T14:00:00",
+    "evidence": {
+      "crash_log": "Stack Overflow detected\n\nStack Trace:\n[  0] test_stack_overflow at line 5\n[  1] test_stack_overflow at line 5\n[  2] test_stack_overflow at line 5\n... (repeated 800+ times)",
+      "crash_type": "stack_overflow",
+      "monitored_process": "MATLAB.exe",
+      "system_snapshot": {
+        "cpu_percent": 45.2,
+        "memory_percent": 62.1,
+        "top_processes": [
+          {"name": "MATLAB.exe", "cpu": 35.0, "memory": 18.0},
+          {"name": "svchost.exe", "cpu": 5.0, "memory": 2.0}
+        ]
+      }
+    }
+  },
+  "expected": {
+    "must_mention": ["栈溢出", "test_stack_overflow", "迭代", "递归深度"],
+    "should_mention": ["dbstack", "递归深度限制", "迭代替代"],
+    "must_not_mention": ["OOM", "越界", "访问违规", "内存泄漏"]
+  },
+  "max_score": 10,
+  "relevant_docs": [
+    "matlab_stack_overflow_guide",
+    "matlab_error_codes_reference",
+    "matlab_profiler_guide"
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "id": "scenario_06_high_cpu",
+  "name": "CPU 高负载伪告警（仿真正常运行）",
+  "description": "仿真正常运行 CPU 满负载，不应误判为异常",
+  "alert": {
+    "host": "simulation-pc",
+    "severity": "warning",
+    "alert_name": "CPU 使用率持续高",
+    "metric": "cpu_percent",
+    "value": 95.0,
+    "threshold": 85.0,
+    "duration_sec": 120,
+    "sensor_id": "",
+    "ts": "2026-05-18T16:30:00",
+    "evidence": {
+      "recent_points": [
+        ["16:25", 92.0], ["16:26", 94.0], ["16:27", 93.5],
+        ["16:28", 95.0], ["16:29", 94.2], ["16:30", 95.0]
+      ]
+    }
+  },
+  "expected": {
+    "must_mention": ["CPU", "正常", "仿真", "负载"],
+    "should_mention": ["计算密集型", "parfor", "无异常"],
+    "must_not_mention": ["崩溃", "栈溢出", "内存泄漏"]
+  },
+  "max_score": 10,
+  "relevant_docs": [
+    "cpu_high_usage",
+    "matlab_profiler_guide"
+  ]
+}

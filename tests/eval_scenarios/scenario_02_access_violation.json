@@ -1,0 +1,39 @@
+{
+  "id": "scenario_02_access_violation",
+  "name": "MATLAB Access Violation 崩溃",
+  "description": "MEX 文件野指针导致访问违规",
+  "alert": {
+    "host": "simulation-pc",
+    "severity": "critical",
+    "alert_name": "MATLAB.exe 异常退出: my_mex.mexw64+0x00001234",
+    "metric": "process_exit",
+    "value": 0,
+    "threshold": 1,
+    "duration_sec": 0,
+    "sensor_id": "MATLAB.exe",
+    "ts": "2026-05-18T14:30:00",
+    "evidence": {
+      "crash_log": "Access Violation detected at address 0x00000000\n\nFault: NULL pointer dereference\n\nStack Trace:\n[  0] my_mex.mexw64+0x00001234\n[  1] my_mex.mexw64+0x00005678\n[  2] my_simulation at line 142",
+      "crash_type": "access_violation",
+      "monitored_process": "MATLAB.exe",
+      "system_snapshot": {
+        "cpu_percent": 38.5,
+        "memory_percent": 55.0,
+        "top_processes": [
+          {"name": "MATLAB.exe", "cpu": 30.0, "memory": 15.0}
+        ]
+      }
+    }
+  },
+  "expected": {
+    "must_mention": ["访问违规", "NULL", "指针", "MEX", "mexw64"],
+    "should_mention": ["my_mex", "野指针", "mxGetPr", "隔离测试"],
+    "must_not_mention": ["栈溢出", "OOM", "递归"]
+  },
+  "max_score": 10,
+  "relevant_docs": [
+    "matlab_access_violation_guide",
+    "matlab_error_codes_reference",
+    "matlab_mex_crash_guide"
+  ]
+}

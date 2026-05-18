@@ -13,6 +13,7 @@ SuperBizAgent 是一个面向运维场景的智能助手系统，提供三大核
 1. **RAG 智能对话** — 基于 Milvus 向量数据库的检索增强生成，支持多轮对话和流式输出
 2. **AIOps 自动诊断** — LangGraph Plan-Execute-Replanner 工作流，自动分析告警根因并生成诊断报告
 3. **主动 OnCall 告警** — Agent 进程轮询硬件温度 + 进程存活监控 + 崩溃日志检测，Webhook 上报，邮件通知
+4. **Agent 评估体系** — 8 场景 ground truth + Recall@K/Precision@K/MRR + LLM-as-Judge，可回归的评测闭环
 
 ## 技术栈
 
@@ -394,7 +395,39 @@ make dev        # 开发模式（热重载）
 make test       # 运行测试 + 覆盖率
 make format     # 代码格式化 (ruff)
 make lint       # 代码检查
+make eval       # AIOps Eval 评分 (RAG检索 + LLM输出)
 ```
+
+## Agent 评估体系 (Eval Harness)
+
+基于 8 个合成崩溃场景的自动化质量评测，覆盖 RAG 检索与 LLM 生成两端：
+
+```bash
+make eval         # 全量 8 场景
+make eval-one SID=01  # 单场景
+```
+
+### 检索评测（纯向量计算，不调 LLM）
+
+| 指标 | 含义 |
+|------|------|
+| **Recall@K** | 标注文档中被检索到的比例 — 测"覆盖面" |
+| **Precision@K** | 返回文档中相关文档的比例 — 测"噪声率" |
+| **MRR** | 第一个相关文档的排名倒数 — 测"排序质量" |
+
+### 生成评测（LLM-as-Judge）
+
+结构化评分量规（Structured Output, temperature=0）：
+
+| 子维度 | 分值 | 评估标准 |
+|--------|:--:|------|
+| 根因准确性 | 0-4 | 是否准确识别了真实根因 |
+| 证据引用 | 0-3 | 是否引用了具体数据/调用栈/日志 |
+| 建议可操作性 | 0-3 | 处理建议是否具体可执行 |
+
+总分 0-10，每次跑完自动存 `.last_eval_score`，下次跑显示对比值。
+
+场景定义在 `tests/eval_scenarios/scenario_XX.json`，每个场景含虚拟告警 payload + `expected` 期望关键词 + `relevant_docs` 应检索文档。
 
 ## 许可证
 

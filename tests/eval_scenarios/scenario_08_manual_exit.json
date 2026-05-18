@@ -1,0 +1,37 @@
+{
+  "id": "scenario_08_manual_exit",
+  "name": "MATLAB 被手动关闭（正常退出）",
+  "description": "用户手动关闭 MATLAB 窗口，Agent 误报为崩溃——应能识别这不是崩溃",
+  "alert": {
+    "host": "simulation-pc",
+    "severity": "warning",
+    "alert_name": "MATLAB.exe 进程退出",
+    "metric": "process_exit",
+    "value": 0,
+    "threshold": 1,
+    "duration_sec": 0,
+    "sensor_id": "MATLAB.exe",
+    "ts": "2026-05-18T17:30:00",
+    "evidence": {
+      "crash_log": "",
+      "crash_type": "unknown",
+      "monitored_process": "MATLAB.exe",
+      "system_snapshot": {
+        "cpu_percent": 15.0,
+        "memory_percent": 40.0,
+        "top_processes": [
+          {"name": "MATLAB.exe", "cpu": 5.0, "memory": 5.0}
+        ]
+      }
+    }
+  },
+  "expected": {
+    "must_mention": ["不确定", "手动关闭"],
+    "should_mention": ["正常退出", "系统日志"],
+    "must_not_mention": ["栈溢出", "访问违规", "OOM Killer", "MEX 崩溃"]
+  },
+  "max_score": 10,
+  "relevant_docs": [
+    "matlab_error_codes_reference"
+  ]
+}

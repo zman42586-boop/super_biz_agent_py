@@ -1,0 +1,39 @@
+{
+  "id": "scenario_04_mex_crash",
+  "name": "MEX 文件栈溢出崩溃",
+  "description": "C++ MEX 函数内部分配超大局部数组导致栈溢出",
+  "alert": {
+    "host": "simulation-pc",
+    "severity": "critical",
+    "alert_name": "MATLAB.exe 异常退出: solver_mex.mexw64+0x0000abcd",
+    "metric": "process_exit",
+    "value": 0,
+    "threshold": 1,
+    "duration_sec": 0,
+    "sensor_id": "MATLAB.exe",
+    "ts": "2026-05-18T15:30:00",
+    "evidence": {
+      "crash_log": "Stack Overflow detected\n\nFault: stack allocation in MEX function\n\nStack Trace:\n[  0] solver_mex.mexw64+0x0000abcd\n[  1] solver_mex.mexw64+0x0000ef01\n[  2] main_simulation at line 89\n\nRegister state indicates large local array allocation.",
+      "crash_type": "stack_overflow",
+      "monitored_process": "MATLAB.exe",
+      "system_snapshot": {
+        "cpu_percent": 42.0,
+        "memory_percent": 60.0,
+        "top_processes": [
+          {"name": "MATLAB.exe", "cpu": 35.0, "memory": 12.0}
+        ]
+      }
+    }
+  },
+  "expected": {
+    "must_mention": ["MEX", "mexw64", "栈溢出", "mxMalloc", "mxCalloc"],
+    "should_mention": ["solver_mex", "栈分配", "堆分配", "mxFree"],
+    "must_not_mention": ["OOM", "越界", "访问违规"]
+  },
+  "max_score": 10,
+  "relevant_docs": [
+    "matlab_mex_crash_guide",
+    "matlab_stack_overflow_guide",
+    "matlab_access_violation_guide"
+  ]
+}

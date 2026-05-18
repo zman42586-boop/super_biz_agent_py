@@ -21,7 +21,7 @@ NC = \033[0m
         install install-dev dev run test test-quick format lint fix type-check \
         security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
-        start-monitor stop-monitor start-api stop-api status-mcp
+        start-monitor stop-monitor start-api stop-api status-mcp eval eval-one
 
 # ============================================================
 # 默认目标：显示帮助信息
@@ -72,6 +72,7 @@ help:
 	@echo "  $(YELLOW)make lint$(NC)         - 🔍 代码检查"
 	@echo "  $(YELLOW)make fix$(NC)          - 🔧 自动修复问题"
 	@echo "  $(YELLOW)make test$(NC)         - 🧪 运行测试"
+	@echo "  $(YELLOW)make eval$(NC)         - 🤖 AIOps Eval 评分"
 	@echo "  $(YELLOW)make check-all$(NC)    - ✅ 运行所有检查"
 	@echo ""
 	@echo "$(CYAN)【其他】$(NC)"
@@ -558,6 +559,14 @@ docs:  ## 打开 API 文档
 watch:  ## 监视文件变化并自动运行测试
 	@echo "$(YELLOW)👀 监视文件变化...$(NC)"
 	python3 -m pytest_watch -- -v
+
+eval:  ## 跑 AIOps eval 评分
+	@echo "$(YELLOW)🤖 运行 AIOps Eval...$(NC)"
+	.venv/bin/python tests/eval_runner.py
+
+eval-one:  ## 跑单个 eval 场景 (用法: make eval-one SID=01)
+	@echo "$(YELLOW)🤖 运行 AIOps Eval scenario_$(SID)...$(NC)"
+	.venv/bin/python tests/eval_runner.py --scenario $(SID)
 
 logs:  ## 查看服务日志
 	@echo "$(YELLOW)📜 查看服务日志...$(NC)"

@@ -1,0 +1,40 @@
+{
+  "id": "scenario_03_out_of_memory",
+  "name": "MATLAB 内存耗尽 (OOM)",
+  "description": "仿真动态扩容导致内存耗尽，MATLAB 报 Out of memory 后退出",
+  "alert": {
+    "host": "simulation-pc",
+    "severity": "critical",
+    "alert_name": "MATLAB.exe 异常退出: Out of memory",
+    "metric": "process_exit",
+    "value": 0,
+    "threshold": 1,
+    "duration_sec": 0,
+    "sensor_id": "MATLAB.exe",
+    "ts": "2026-05-18T15:00:00",
+    "evidence": {
+      "crash_log": "Out of Memory detected\n\nMemory usage at crash:\n  Physical Memory: 31.2 GB / 32.0 GB (97.5%)\n  MATLAB.exe: 28.1 GB\n\nRecent heartbeat trend:\n  T-5min:  memory 82%\n  T-4min:  memory 88%\n  T-3min:  memory 92%\n  T-2min:  memory 95%\n  T-1min:  memory 97%",
+      "crash_type": "out_of_memory",
+      "monitored_process": "MATLAB.exe",
+      "system_snapshot": {
+        "cpu_percent": 55.0,
+        "memory_percent": 98.2,
+        "memory_used_gb": 31.2,
+        "memory_total_gb": 32.0,
+        "top_processes": [
+          {"name": "MATLAB.exe", "cpu": 20.0, "memory": 87.5}
+        ]
+      }
+    }
+  },
+  "expected": {
+    "must_mention": ["内存", "OOM", "分块", "预分配", "泄漏"],
+    "should_mention": ["tall array", "clear", "动态扩容", "end+1", "checkpoint"],
+    "must_not_mention": ["栈溢出", "访问违规"]
+  },
+  "max_score": 10,
+  "relevant_docs": [
+    "matlab_out_of_memory_guide",
+    "matlab_error_codes_reference"
+  ]
+}

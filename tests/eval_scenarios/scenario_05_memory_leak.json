@@ -1,0 +1,41 @@
+{
+  "id": "scenario_05_memory_leak",
+  "name": "MATLAB 内存泄漏导致系统 OOM Killer",
+  "description": "MATLAB 循环中动态扩容，内存持续增长，系统 OOM Killer 杀掉进程",
+  "alert": {
+    "host": "simulation-pc",
+    "severity": "critical",
+    "alert_name": "MATLAB.exe 异常退出（未找到崩溃日志）",
+    "metric": "process_exit",
+    "value": 0,
+    "threshold": 1,
+    "duration_sec": 0,
+    "sensor_id": "MATLAB.exe",
+    "ts": "2026-05-18T16:00:00",
+    "evidence": {
+      "crash_log": "",
+      "crash_type": "unknown",
+      "monitored_process": "MATLAB.exe",
+      "system_snapshot": {
+        "cpu_percent": 35.0,
+        "memory_percent": 99.1,
+        "memory_used_gb": 31.7,
+        "memory_total_gb": 32.0,
+        "top_processes": [
+          {"name": "MATLAB.exe", "cpu": 15.0, "memory": 94.0}
+        ]
+      }
+    }
+  },
+  "expected": {
+    "must_mention": ["内存", "OOM Killer", "泄漏", "系统杀进程"],
+    "should_mention": ["动态扩容", "preallocate", "分段加载", "内存监控"],
+    "must_not_mention": ["栈溢出", "指针"]
+  },
+  "max_score": 10,
+  "relevant_docs": [
+    "matlab_out_of_memory_guide",
+    "matlab_error_codes_reference",
+    "matlab_profiler_guide"
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "id": "scenario_07_process_exit_unknown",
+  "name": "进程未知原因退出（无崩溃日志）",
+  "description": "MATLAB 进程消失但无 crash dump，系统状态正常，无法确定原因",
+  "alert": {
+    "host": "simulation-pc",
+    "severity": "warning",
+    "alert_name": "MATLAB.exe 异常退出（未找到崩溃日志）",
+    "metric": "process_exit",
+    "value": 0,
+    "threshold": 1,
+    "duration_sec": 0,
+    "sensor_id": "MATLAB.exe",
+    "ts": "2026-05-18T17:00:00",
+    "evidence": {
+      "crash_log": "",
+      "crash_type": "unknown",
+      "monitored_process": "MATLAB.exe",
+      "system_snapshot": {
+        "cpu_percent": 25.0,
+        "memory_percent": 45.0,
+        "top_processes": [
+          {"name": "chrome.exe", "cpu": 10.0, "memory": 8.0}
+        ]
+      }
+    }
+  },
+  "expected": {
+    "must_mention": ["无法确定", "未知"],
+    "should_mention": ["手动关闭", "系统日志", "建议启用详细日志"],
+    "must_not_mention": ["栈溢出", "OCSC", "MEX 崩溃"]
+  },
+  "max_score": 10,
+  "relevant_docs": [
+    "matlab_error_codes_reference"
+  ]
+}
