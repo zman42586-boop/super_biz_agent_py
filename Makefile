@@ -21,7 +21,7 @@ NC = \033[0m
         install install-dev dev run test test-quick format lint fix type-check \
         security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
-        start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp
+        start-monitor stop-monitor start-api stop-api status-mcp
 
 # ============================================================
 # 默认目标：显示帮助信息
@@ -40,15 +40,13 @@ help:
 	@echo "  $(YELLOW)make status$(NC)       - 📊 查看容器状态"
 	@echo ""
 	@echo "$(CYAN)【服务管理】$(NC)"
-	@echo "  $(YELLOW)make start$(NC)        - 🚀 启动所有服务（MCP + FastAPI）"
-	@echo "  $(YELLOW)make stop$(NC)         - 🛑 停止所有服务（MCP + FastAPI）"
+	@echo "  $(YELLOW)make start$(NC)        - 🚀 启动所有服务（Monitor MCP + FastAPI）"
+	@echo "  $(YELLOW)make stop$(NC)         - 🛑 停止所有服务（Monitor MCP + FastAPI）"
 	@echo "  $(YELLOW)make restart$(NC)      - 🔄 重启所有服务"
 	@echo "  $(YELLOW)make check$(NC)        - 🔍 检查 FastAPI 服务状态"
 	@echo "  $(YELLOW)make status-mcp$(NC)   - 📊 查看 MCP 服务状态"
 	@echo ""
 	@echo "$(CYAN)【MCP 服务管理】$(NC)"
-	@echo "  $(YELLOW)make start-cls$(NC)     - 📋 启动 CLS MCP 服务"
-	@echo "  $(YELLOW)make stop-cls$(NC)      - 🛑 停止 CLS MCP 服务"
 	@echo "  $(YELLOW)make start-monitor$(NC) - 📊 启动 Monitor MCP 服务"
 	@echo "  $(YELLOW)make stop-monitor$(NC)  - 🛑 停止 Monitor MCP 服务"
 	@echo "  $(YELLOW)make start-api$(NC)     - 🚀 启动 FastAPI 服务"
@@ -85,7 +83,7 @@ help:
 	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
 	@echo "$(GREEN)使用示例:$(NC)"
 	@echo "  1. 一键初始化: $(YELLOW)make init$(NC)"
-	@echo "  2. 启动服务:   $(YELLOW)make start$(NC) (自动启动 CLS + Monitor MCP + FastAPI)"
+	@echo "  2. 启动服务:   $(YELLOW)make start$(NC) (自动启动 Monitor MCP + FastAPI)"
 	@echo "  3. 检查状态:   $(YELLOW)make status-mcp$(NC)"
 	@echo "  4. 停止服务:   $(YELLOW)make stop$(NC)"
 	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
@@ -189,27 +187,6 @@ status:
 # MCP 服务管理
 # ============================================================
 
-# 启动 CLS MCP 服务
-start-cls:
-	@echo "$(YELLOW)📋 启动 CLS MCP 服务...$(NC)"
-	@if pgrep -f "mcp_servers/cls_server.py" > /dev/null 2>&1; then \
-		echo "$(GREEN)✅ CLS MCP 服务已经在运行中$(NC)"; \
-	else \
-		echo "$(YELLOW)📦 正在启动 CLS MCP 服务（后台运行）...$(NC)"; \
-		nohup .venv/bin/python mcp_servers/cls_server.py > mcp_cls.log 2>&1 & \
-		echo $$! > mcp_cls.pid; \
-		sleep 2; \
-		if pgrep -f "mcp_servers/cls_server.py" > /dev/null 2>&1; then \
-			echo "$(GREEN)✅ CLS MCP 服务启动成功$(NC)"; \
-			echo "$(YELLOW)   PID: $$(cat mcp_cls.pid)$(NC)"; \
-			echo "$(YELLOW)   URL: http://127.0.0.1:8003/mcp$(NC)"; \
-			echo "$(YELLOW)   日志: mcp_cls.log$(NC)"; \
-		else \
-			echo "$(RED)❌ CLS MCP 服务启动失败$(NC)"; \
-			echo "$(YELLOW)请检查日志: tail -f mcp_cls.log$(NC)"; \
-		fi; \
-	fi
-
 # 启动 Monitor MCP 服务
 start-monitor:
 	@echo "$(YELLOW)📊 启动 Monitor MCP 服务...$(NC)"
@@ -254,19 +231,6 @@ stop-monitor:
 status-mcp:
 	@echo "$(YELLOW)📊 MCP 服务状态:$(NC)"
 	@echo ""
-	@echo "$(CYAN)CLS MCP 服务:$(NC)"
-	@if pgrep -f "mcp_servers/cls_server.py" > /dev/null 2>&1; then \
-		pid=$$(pgrep -f "mcp_servers/cls_server.py"); \
-		echo "  状态: $(GREEN)运行中$(NC)"; \
-		echo "  PID: $$pid"; \
-		echo "  URL: http://127.0.0.1:8003/mcp"; \
-		curl -s http://127.0.0.1:8003/mcp > /dev/null 2>&1 && \
-			echo "  连接: $(GREEN)✅ 正常$(NC)" || \
-			echo "  连接: $(RED)❌ 无法连接$(NC)"; \
-	else \
-		echo "  状态: $(RED)未运行$(NC)"; \
-	fi
-	@echo ""
 	@echo "$(CYAN)Monitor MCP 服务:$(NC)"
 	@if pgrep -f "mcp_servers/monitor_server.py" > /dev/null 2>&1; then \
 		pid=$$(pgrep -f "mcp_servers/monitor_server.py"); \
@@ -279,22 +243,16 @@ status-mcp:
 	else \
 		echo "  状态: $(RED)未运行$(NC)"; \
 	fi
-	@echo ""
-	@echo "$(CYAN)Math MCP 服务:$(NC)"
-	@echo "  状态: $(YELLOW)已移除（示例服务）$(NC)"
 
 # ============================================================
 # FastAPI 服务管理
 # ============================================================
 
-# 启动所有服务（MCP + FastAPI）
+# 启动所有服务（Monitor MCP + FastAPI）
 start:
 	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
 	@echo "$(GREEN)🚀 启动所有服务$(NC)"
 	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
-	@echo ""
-	@$(MAKE) start-cls
-	@sleep 1
 	@echo ""
 	@$(MAKE) start-monitor
 	@sleep 1
@@ -320,7 +278,7 @@ start-api:
 		echo "$(YELLOW)   日志: server.log$(NC)"; \
 	fi
 
-# 停止所有服务（FastAPI + MCP）
+# 停止所有服务（FastAPI + Monitor MCP）
 stop:
 	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
 	@echo "$(GREEN)🛑 停止所有服务$(NC)"
@@ -328,32 +286,11 @@ stop:
 	@echo ""
 	@$(MAKE) stop-api
 	@echo ""
-	@$(MAKE) stop-cls
-	@echo ""
 	@$(MAKE) stop-monitor
 	@echo ""
 	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
 	@echo "$(GREEN)✅ 所有服务已停止！$(NC)"
 	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
-
-# 停止 CLS MCP 服务
-stop-cls:
-	@echo "$(YELLOW)🛑 停止 CLS MCP 服务...$(NC)"
-	@if [ -f mcp_cls.pid ]; then \
-		pid=$$(cat mcp_cls.pid); \
-		if ps -p $$pid > /dev/null 2>&1; then \
-			kill $$pid; \
-			echo "$(GREEN)✅ CLS MCP 服务已停止 (PID: $$pid)$(NC)"; \
-		else \
-			echo "$(YELLOW)⚠️  进程不存在 (PID: $$pid)$(NC)"; \
-		fi; \
-		rm -f mcp_cls.pid; \
-	else \
-		echo "$(YELLOW)⚠️  未找到 mcp_cls.pid 文件$(NC)"; \
-		pkill -f "mcp_servers/cls_server.py" 2>/dev/null && \
-			echo "$(GREEN)✅ 已停止所有 CLS MCP 进程$(NC)" || \
-			echo "$(YELLOW)⚠️  没有运行中的 CLS MCP 进程$(NC)"; \
-	fi
 
 # 停止 FastAPI 服务
 stop-api:
@@ -602,7 +539,6 @@ clean:  ## 清理临时文件
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
 	rm -rf htmlcov/ .coverage
 	rm -f server.pid server.log
-	rm -f mcp_cls.pid mcp_cls.log
 	rm -f mcp_monitor.pid mcp_monitor.log
 	rm -rf uploads/*.tmp 2>/dev/null || true
 	@echo "$(GREEN)✅ 清理完成$(NC)"

@@ -8,9 +8,13 @@ from pydantic import BaseModel, Field
 
 
 class AlertEvidence(BaseModel):
-    """告警证据（传感器最近数据点等）"""
+    """告警证据（传感器最近数据点、崩溃日志等）"""
     lhm_url: Optional[str] = None
     recent_points: List[List[Any]] = Field(default_factory=list)
+    crash_log: Optional[str] = Field(default=None, description="进程崩溃日志摘要")
+    crash_type: Optional[str] = Field(default=None, description="崩溃类型: stack_overflow / access_violation 等")
+    monitored_process: Optional[str] = Field(default=None, description="被监控的进程名")
+    system_snapshot: Optional[dict] = Field(default=None, description="崩溃时系统快照 {cpu, memory, top_processes}")
     extra: Dict[str, Any] = Field(default_factory=dict)
 
 

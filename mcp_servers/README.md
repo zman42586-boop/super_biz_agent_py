@@ -1,7 +1,7 @@
 # MCP Servers
 
 本目录只保留诊断取证类 MCP 服务。主动 OnCall 检测由 `scripts/lhm_alert_agent.py`
-负责，日志检索已迁移为 FastAPI 本地工具 `app/tools/log_tool.py`。
+负责，温度/进程监控在同一主机运行；日志检索为 FastAPI 本地工具 `app/tools/log_tool.py`。
 
 ## 服务列表
 
@@ -37,7 +37,7 @@ python mcp_servers/monitor_server.py
 ## AIOps 诊断分工
 
 ```text
-主动检测层: scripts/lhm_alert_agent.py 或外部告警源
+主动检测层: scripts/lhm_alert_agent.py (温度 + 进程监控)
 告警入口:   POST /api/alerts/ingest
 诊断取证:   Monitor MCP + 本地工具
 通知输出:   SMTP 邮件

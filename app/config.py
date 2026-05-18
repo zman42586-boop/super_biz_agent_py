@@ -43,16 +43,9 @@ class Settings(BaseSettings):
     chunk_max_size: int = 800
     chunk_overlap: int = 100
 
-    # MCP 服务配置（支持多 Server，本地 + 远程均可）
-    # Monitor MCP — 本机监控数据采集（CPU / 内存 / LHM 温度）
+    # MCP 服务配置 — 本机监控数据采集（CPU / 内存 / LHM 温度）
     mcp_monitor_transport: str = "streamable-http"
     mcp_monitor_url: str = "http://localhost:8004/mcp"
-    # CLS MCP — 腾讯云日志服务（远程），参考: https://cloud.tencent.com/developer/mcp/server/11710
-    mcp_cls_transport: str = "streamable-http"
-    mcp_cls_url: str = "http://localhost:8003/mcp"
-    # 预留：通用远程 MCP Server，方便快速接入公网工具
-    mcp_remote_transport: str = "streamable-http"
-    mcp_remote_url: str = ""
 
     # SMTP 邮件配置
     smtp_host: str = "smtp.163.com"
@@ -71,7 +64,8 @@ class Settings(BaseSettings):
     lhm_sensor_name_contains: str = "CCDs Max (Tdie)"
 
     # OnCall 告警规则（温度，用于本机 Agent）
-    oncall_temp_threshold_c: float = 50.0     # 触发温度（°C）
+    oncall_temp_enabled: bool = False         # 温度监控开关（默认关闭，主要靠进程监控）
+    oncall_temp_threshold_c: float = 85.0     # 触发温度（°C）
     oncall_temp_duration_sec: int = 60        # 连续超阈持续秒数
     oncall_temp_cooldown_sec: int = 120       # 告警冷却期（秒），期间不重复发邮件
     # 心跳超时：Agent 定期上报心跳，超过此时间未收到则判定主机失联
@@ -80,28 +74,20 @@ class Settings(BaseSettings):
     # AIOps 自动诊断开关（仅对 critical 告警）
     oncall_auto_diagnosis: bool = True
 
+    # 进程监控配置（检测 MATLAB 等长时间运行进程的崩溃）
+    oncall_monitor_process: str = ""        # 监控的进程名，如 MATLAB.exe
+    oncall_monitor_crash_dir: str = ""      # 崩溃日志目录
+    oncall_monitor_crash_pattern: str = ""  # 崩溃日志文件名模式，如 matlab_crash_dump.*
+
     @property
     def mcp_servers(self) -> Dict[str, Dict[str, Any]]:
-        """获取完整的 MCP 服务器配置（自动跳过未配置 URL 的 Server）"""
-        servers: Dict[str, Dict[str, Any]] = {
+        """获取 MCP 服务器配置（当前仅本机 Monitor MCP）"""
+        return {
             "monitor": {
                 "transport": self.mcp_monitor_transport,
                 "url": self.mcp_monitor_url,
             },
         }
-        # CLS 日志 MCP（远程） — 仅当配置了 URL 才注册
-        if self.mcp_cls_url.strip():
-            servers["cls"] = {
-                "transport": self.mcp_cls_transport,
-                "url": self.mcp_cls_url,
-            }
-        # 通用远程 MCP — 快速接入任意公网工具
-        if self.mcp_remote_url.strip():
-            servers["remote"] = {
-                "transport": self.mcp_remote_transport,
-                "url": self.mcp_remote_url,
-            }
-        return servers
 
 
 # 全局配置实例

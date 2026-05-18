@@ -87,23 +87,26 @@ async def resolve_alert(alert_id: str) -> AlertRecord:
 
 
 class HeartbeatRequest(BaseModel):
-    """边缘 Agent 心跳上报请求体——携带系统状态供死因分析"""
+    """Agent 进程心跳上报请求体——携带系统状态供死因分析"""
     host: str = Field(description="主机名，用于标识上报来源")
     temperature: float | None = Field(default=None, description="当前温度 (°C)")
     temp_threshold: float | None = Field(default=None, description="告警阈值 (°C)")
     recent_points: list = Field(default_factory=list, description="最近温度数据点 [[ts, val], ...]")
-    critical_snapshot: dict | None = Field(default=None, description="温度危险时的系统快照 (CPU/内存/进程)")
+    cpu_percent: float | None = Field(default=None, description="当前 CPU 使用率 %")
+    memory_percent: float | None = Field(default=None, description="当前内存使用率 %")
+    top_processes: list = Field(default_factory=list, description="TOP 进程列表 [{name, cpu, memory}, ...]")
+    critical_snapshot: dict | None = Field(default=None, description="温度危险时的完整系统快照 (CPU/内存/进程)")
 
 
 @router.post(
     "/heartbeat",
-    summary="边缘 Agent 心跳上报（含系统快照供死因分析）",
+    summary="Agent 心跳上报（含系统快照供死因分析）",
     dependencies=[Depends(_verify_token)],
 )
 async def heartbeat(req: HeartbeatRequest) -> dict:
-    """边缘 Agent 定期调用此接口告知云端"我还活着"。
+    """Agent 进程定期调用此接口告知主服务"我还活着"。
 
-    - 云端记录每个主机的最近心跳时间和系统快照
+    - 服务端记录每个主机的最近心跳时间和系统快照
     - 超过 oncall_heartbeat_timeout_sec 秒未收到心跳 → 自动宕机告警
     - 宕机告警会包含最后心跳的温度/CPU/进程数据，用于推断死因
     - 心跳恢复后自动 resolve 宕机告警

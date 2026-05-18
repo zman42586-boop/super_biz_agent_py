@@ -22,7 +22,7 @@ class AlertService:
     - 存储活跃告警列表，供 /api/alerts/active 查询
     - 发送首次告警邮件
     - 可选：后台异步触发 AIOps 诊断并把报告追加到第二封邮件
-    - 心跳监控：检测边缘主机失联，自动触发宕机告警
+    - 心跳监控：检测主机失联，自动触发宕机告警
     """
 
     def __init__(self) -> None:
@@ -97,7 +97,7 @@ class AlertService:
     # ------------------------------------------------------------------
 
     def record_heartbeat(self, host: str, snapshot: dict[str, Any] | None = None) -> None:
-        """边缘 Agent 定期上报心跳，云端记录时间 + 快照并启动失联检测。
+        """Agent 进程定期上报心跳，服务端记录时间 + 快照并启动失联检测。
 
         snapshot 包含温度 / CPU / 内存 / 进程等，用于死因分析。
         """
