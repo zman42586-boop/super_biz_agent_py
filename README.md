@@ -1,436 +1,233 @@
 # SuperBizAgent
 
-> 企业级 OnCall 智能运维平台 — RAG 知识库问答 + AIOps 自动诊断 + 主动告警 + 心跳监控 + MCP 多工具集成
+面向 MATLAB 桌面进程的主动轮询监控与 AIOps 诊断项目。系统持续采集 CPU、内存、温度和高占用进程；当 MATLAB 从“存在”变为“消失”时，查找最新 crash dump，把日志证据与 Milvus 知识库召回结果交给 Agent 分析，并可用独立 Judge 模型离线评估诊断报告。
 
-[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
-[![LangChain](https://img.shields.io/badge/LangChain-latest-orange.svg)](https://www.langchain.com/)
+> 当前定位是个人/实验环境的工程原型，不是已经接入生产监控平台的商业系统。评测数据来自 40 条可回答查询和 10 条不可回答查询，不能等同于线上真实故障准确率。
 
-## 项目概述
+## 当前能力
 
-SuperBizAgent 是一个面向运维场景的智能助手系统，提供三大核心能力：
+- 主动轮询：默认每 5 秒检查目标进程，同时采集系统 CPU、内存和 Top 进程。
+- MATLAB 退出检测：只有观察到进程从存活变为消失，才触发“进程异常退出”流程；如果能找到 dump 就附带 dump，否则仍会上报退出事件。
+- 可选温度监控：通过 LibreHardwareMonitor Web API 读取温度，默认关闭，可独立开启。
+- 心跳与死前快照：每轮向 FastAPI 上报状态，并在本地保存轻量快照；服务端可检测心跳超时。
+- RAG 诊断：Dense 向量召回 + Milvus BM25 稀疏召回，经 RRF 融合后按置信度决定是否查询改写、重试和交叉编码重排。
+- 证据约束：最终上下文分为“事实、检索证据、推断”；证据不足时明确输出“原因未确定”和需补充的日志。
+- 分层记忆：诊断报告写入 `memory/incidents/`，摘要写入 `memory/MEMORY.md`，后续可重新入库参与召回。
+- 评测：支持 Recall@5、Precision@5、MRR、nDCG@5、Hit@1、拒答率、重试率、重排率和延迟统计；生成质量由独立 LLM Judge 评分。
 
-1. **RAG 智能对话** — 基于 Milvus 向量数据库的检索增强生成，支持多轮对话和流式输出
-2. **AIOps 自动诊断** — LangGraph Plan-Execute-Replanner 工作流，自动分析告警根因并生成诊断报告
-3. **主动 OnCall 告警** — Agent 进程轮询硬件温度 + 进程存活监控 + 崩溃日志检测，Webhook 上报，邮件通知
-4. **Agent 评估体系** — 8 场景 ground truth + Recall@K/Precision@K/MRR + LLM-as-Judge，可回归的评测闭环
+## 真实链路
 
-## 技术栈
-
-| 层级 | 选型 |
-|------|------|
-| Web 框架 | FastAPI + Uvicorn + SSE (sse-starlette) |
-| AI 编排 | LangChain + LangGraph (StateGraph, MemorySaver checkpoint) |
-| LLM | OpenAI 兼容 API (langchain-openai)，默认对接 DeepSeek，可切换任意兼容厂商 |
-| Embedding | HuggingFace sentence-transformers (BAAI/bge-small-zh-v1.5，本地运行) |
-| 向量数据库 | Milvus 2.5 (pymilvus + langchain-milvus)，Docker Compose 部署 |
-| 工具协议 | MCP (langchain-mcp-adapters + fastmcp)，本机 Monitor MCP |
-| 前端 | 原生 HTML/CSS/JS，marked.js 渲染 Markdown，highlight.js 代码高亮 |
-| 监控数据 | psutil (CPU/内存)，LibreHardwareMonitor (硬件温度传感器) |
-| 邮件 | SMTP SSL (smtplib) |
-| 包管理 | uv + pyproject.toml |
-
-## 架构
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Web UI (:9900)                           │
-│             快速问答 / 流式对话 / AIOps 诊断                      │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────────┐
-│                    FastAPI (app/main.py)                        │
-│  /api/chat  /api/chat_stream  /api/aiops  /api/alerts/ingest   │
-│  /api/upload  /api/heartbeat  /health                          │
-└──────┬──────────┬──────────┬──────────┬──────────────┬─────────┘
-       │          │          │          │              │
-┌──────▼──┐ ┌────▼────┐ ┌───▼────┐ ┌───▼──────┐ ┌─────▼──────┐
-│ RAG     │ │ AIOps   │ │ Alert   │ │ Memory   │ │ MCP Client │
-│ Agent   │ │ Service │ │ Service │ │ Reader/  │ │ (Multi-    │
-│ (Lang-  │ │ (Lang-  │ │ (去重+  │ │ Writer   │ │  Server)   │
-│ Graph)  │ │ Graph)  │ │ 邮件+   │ │          │ │            │
-│         │ │         │ │ 诊断)   │ │          │ │            │
-└────┬────┘ └───┬─────┘ └───┬─────┘ └────┬─────┘ └──────┬─────┘
-     │          │           │             │              │
-┌────▼────┐ ┌──▼──────────▼──┐ ┌───────▼───────┐ ┌─────▼─────┐
-│ Milvus  │ │ Plan → Execute │ │ SMTP (163)    │ │ Monitor   │
-│ (向量库) │ │ → Microcompact│ │               │ │ MCP (:8004│
-│         │ │ → Replan       │ │               │ │ CPU/Mem/  │
-│         │ │                │ │               │ │ LHM Temp) │
-└─────────┘ └────────────────┘ └───────────────┘ └───────────┘
-
-┌─────────────────────────────────────────────────────────────────┐
-│  Agent 进程 (scripts/lhm_alert_agent.py)                       │
-│  每 5s 轮询：温度 + 进程存活 + 崩溃日志检测 → Webhook 上报       │
-│  每轮心跳上报完整系统状态 → 服务端失联检测 → 死因分析             │
-└─────────────────────────────────────────────────────────────────┘
+```text
+每 5 秒轮询 MATLAB.exe
+        |
+        +-- 仍存活：CPU/内存/温度/Top 进程 -> 心跳与本地快照
+        |
+        `-- 上轮存活、本轮消失
+                |
+                +-- 扫描最新 crash dump，解析异常类型/调用栈/错误行
+                `-- POST /api/alerts/ingest
+                        |
+                        +-- 告警去重与邮件
+                        `-- LangGraph Planner -> Executor -> Replanner
+                                |
+                                +-- Milvus 混合检索与证据置信度
+                                +-- MCP 实时指标/本地日志工具
+                                `-- 事实 + 证据 + 推断的诊断报告
+                                        |
+                                        +-- 写入分层记忆
+                                        `-- 离线时由独立 Judge 模型评分
 ```
 
-## 项目结构
+注意：DeepSeek Flash 负责生成诊断；DeepSeek Pro 只在评测脚本中作为 Judge 使用，不在每次线上告警中强制执行。使用不同模型能降低“同一模型生成后再给自己打分”的相关性偏差，但不能消除 Judge 偏差，所以仍需人工标注集和规则指标。
 
-```
-super_biz_agent_py/
-├── app/
-│   ├── main.py                     # FastAPI 入口，路由挂载，Milvus 生命周期
-│   ├── config.py                   # Pydantic Settings（LLM/Milvus/RAG/MCP/SMTP/告警）
-│   ├── api/
-│   │   ├── chat.py                 # /api/chat, chat_stream, chat/clear
-│   │   ├── aiops.py                # /api/aiops (SSE 流式诊断)
-│   │   ├── alerts.py               # /api/alerts/ingest, active, resolve + /api/heartbeat
-│   │   ├── file.py                 # /api/upload（文件上传 + 自动入库）
-│   │   └── health.py               # /health（服务 + Milvus 状态）
-│   ├── services/
-│   │   ├── rag_agent_service.py    # RAG Agent（LangGraph create_agent + Snip 截断）
-│   │   ├── aiops_service.py        # Plan-Execute-Replanner 工作流编译与执行
-│   │   ├── alert_service.py        # 告警去重 + 邮件 + 触发诊断 + 心跳监控 + 死因分析
-│   │   ├── mail_service.py         # SMTP SSL 邮件发送
-│   │   ├── vector_embedding_service.py  # HuggingFace 本地 Embedding
-│   │   ├── vector_store_manager.py      # langchain-milvus VectorStore 封装
-│   │   ├── vector_index_service.py      # 文件读取 → 分割 → 入库
-│   │   ├── vector_search_service.py     # Milvus 向量检索
-│   │   └── document_splitter_service.py # Markdown 标题分割 + 递归字符分割
-│   ├── agent/
-│   │   ├── mcp_client.py           # MultiServerMCPClient + 重试拦截器
-│   │   └── aiops/
-│   │       ├── state.py            # PlanExecuteState (含全量替换 reducer)
-│   │       ├── planner.py          # 制定诊断计划（RAG + 长期记忆 + Skill 注入）
-│   │       ├── executor.py         # 执行单步（LLM 决策工具调用 → ToolNode 执行）
-│   │       ├── microcompact.py     # 大工具结果落盘 artifacts/ + 摘要写回
-│   │       ├── replanner.py        # 决策 continue/replan/respond + Collapse 折叠
-│   │       └── utils.py            # format_tools_description
-│   ├── claude_skills/
-│   │   ├── __init__.py
-│   │   └── reader.py               # 解析 .claude/skills/*.md (YAML frontmatter + 正文)
-│   ├── memory/
-│   │   ├── __init__.py
-│   │   ├── memory_reader.py        # 加载 MEMORY.md Hot 记忆注入 Prompt
-│   │   └── memory_writer.py        # 诊断报告写入 incidents/ + 更新 MEMORY.md 索引
-│   ├── tools/
-│   │   ├── knowledge_tool.py       # retrieve_knowledge (Milvus 向量检索)
-│   │   ├── time_tool.py            # get_current_time
-│   │   └── log_tool.py             # search_log (本地 app_*.log 检索)
-│   ├── models/
-│   │   ├── request.py              # ChatRequest, ClearRequest
-│   │   ├── response.py             # ChatResponse, SessionInfoResponse, ApiResponse
-│   │   ├── alert.py                # AlertIngestRequest, AlertRecord, AlertEvidence
-│   │   └── aiops.py                # AIOpsRequest, DiagnosisResponse
-│   ├── core/
-│   │   ├── llm_factory.py          # ChatOpenAI 工厂（支持多厂商切换）
-│   │   └── milvus_client.py        # Milvus 连接管理 + Collection 创建/索引/维度检测
-│   └── utils/
-│       ├── logger.py               # Loguru 配置（控制台 + 按天轮转文件）
-│       └── token_meter.py          # Token 估算 + 压缩统计日志
-├── mcp_servers/
-│   ├── monitor_server.py           # Monitor MCP Server (CPU/内存/LHM 温度)
-│   └── README.md
-├── scripts/
-│   └── lhm_alert_agent.py          # OnCall 检测 Agent（温度轮询 + 进程监控 + 崩溃日志 + 心跳）
-├── static/
-│   ├── index.html                  # 前端 SPA
-│   ├── app.js                      # 前端逻辑
-│   └── styles.css                  # 样式
-├── .claude/skills/                 # Claude Code 风格 Skill (Markdown + frontmatter)
-├── aiops-docs/                     # 默认运维知识文档
-├── oncall_knowledge_docs_50/       # OnCall 知识库 (incidents/runbooks/services/sops/middleware)
-├── memory/                         # 运行时生成：MEMORY.md, incidents/, artifacts/, emergency/
-├── vector-database.yml             # Milvus + etcd + MinIO + Attu Docker Compose
-├── start-windows.bat               # Windows 一键启动脚本
-├── stop-windows.bat                # Windows 一键停止脚本
-├── Makefile                        # Linux/macOS 运维命令集
-├── pyproject.toml                  # 项目配置与依赖
-└── .env                            # 环境变量（LLM/Milvus/MCP/SMTP/告警阈值）
-```
+## RAG 实现
 
-## AIOps 诊断流程
+### 文档与切分
 
-基于 LangGraph 的 **Plan-Execute-Replanner** 循环：
+仓库目前包含 36 篇 MATLAB/AIOps 文档和 50 篇通用 OnCall 文档。`aiops-docs/` 中新增了 MathWorks 官方排障摘要以及公开案例的工程化整理；文件是 Markdown，但不是把网页原文整页复制进仓库。
 
-```
-输入（告警/任务描述）
-  │
-  ▼
-Planner ────────────── 制定步骤计划
-  │                    ├── 从 Milvus 检索相关经验文档
-  │                    ├── 加载 MEMORY.md 长期记忆
-  │                    ├── 注入 .claude/skills/*.md 标准流程
-  │                    └── 基于可用工具列表生成结构化计划
-  ▼
-Executor ───────────── 执行当前步骤
-  │                    ├── LLM 决策调用哪些工具
-  │                    ├── ToolNode 自动执行（本地工具 + MCP 工具）
-  │                    └── 结果追加到 past_steps
-  ▼
-Microcompact ───────── 压缩超大门槛
-  │                    ├── 工具结果 > 阈值 → 落盘 memory/artifacts/{session}/
-  │                    └── 替换为 "头 + 关键错误行 + 尾" 摘要
-  ▼
-Replanner ──────────── 决策
-  │                    ├── respond: 信息充足 → 生成最终报告
-  │                    ├── continue: 计划合理 → 继续下一步
-  │                    └── replan: 调整计划 → 替换剩余步骤（有限制）
-  │                    ├── Collapse: 步骤过多时折叠旧步骤为摘要
-  │                    └── 防死循环: MAX_STEPS=8 强制 respond
-  ▼
-MemoryWriter ───────── 持久化
-                       ├── Cold: 完整报告 → memory/incidents/
-                       ├── Hot: 索引摘要 → memory/MEMORY.md
-                       └── 自动索引到 Milvus（供后续召回）
-```
+Markdown 先按 H1/H2 划分 parent，再在每个 parent 内按 BGE tokenizer 切 child：
 
-## 告警与心跳监控
+| 参数 | 当前值 | 说明 |
+|---|---:|---|
+| child size | 420 tokens | 不是字符数 |
+| overlap | 64 tokens | 只发生在同一 H1/H2 parent 内 |
+| 标题上下文 | 文档标题 + H1/H2 路径 | 写入每个 child，减少碎片失去主题 |
+| source type | official/case/incident/knowledge | 支持过滤和信任级别标注 |
 
-```
-Agent 进程 (lhm_alert_agent.py, 每 5s)
-  │
-  ├── 进程监控（优先级最高）
-  │   ├── 检查 MONITOR_PROCESS 是否存活
-  │   ├── 上次还在、这次消失 → 扫描崩溃日志目录
-  │   ├── 解析 MATLAB crash dump（崩溃类型 + 调用栈 + 出错行号）
-  │   └── POST /api/alerts/ingest（含量崩溃原因） → 立刻收到邮件
-  │
-  ├── 采集系统快照（每轮都做，不再只在高温时）
-  │   ├── CPU% + 内存% + TOP 10 进程
-  │   └── 写 light_snapshot.json 到磁盘
-  │
-  ├── 发送心跳 POST /api/heartbeat（每轮都发）
-  │   └── 携带: 温度 + CPU% + 内存% + TOP 进程列表
-  │
-  ├── 读取 LibreHardwareMonitor 温度传感器
-  │
-  ├── 温度连续超阈 ONCALL_TEMP_DURATION_SEC → POST /api/alerts/ingest
-  │   ├── warning (超阈 < 5°C) / critical (超阈 ≥ 5°C)
-  │   └── 冷却期 ONCALL_TEMP_COOLDOWN_SEC 内不重复
-  │
-  ├── 温度 ≥ EMERGENCY_SNAPSHOT_TEMP_C → 写 last_breath.json
-  │
-  └── 💀 主机死机 → 心跳中断 → 重启后启动自检打印死前快照
+### 召回与重排
 
-服务端 (alert_service.py)
-  │
-  ├── ingest: 去重 → 发首次告警邮件 → critical + auto_diagnosis → 后台 AIOps
-  │
-  └── _check_heartbeats (每 30s):
-      ├── 心跳超时 ONCALL_HEARTBEAT_TIMEOUT_SEC → 主机失联
-      ├── 取最后心跳快照推断死因:
-      │   ├── 温度走势 → 散热失效 / 过热关机
-      │   ├── CPU/内存 → CPU 过载
-      │   ├── TOP 进程 → 嫌疑人名单
-      │   └── 综合判定 → 发送含死因分析的告警邮件
-      └── 心跳恢复 → 自动 resolve 失联告警
-```
+| 阶段 | 实现 | 当前参数 |
+|---|---|---:|
+| Dense 召回 | `BAAI/bge-small-zh-v1.5`，512 维，Milvus FLAT + IP | 20 candidates |
+| Sparse 召回 | Milvus 内置 BM25 中文 analyzer + 倒排索引 | 20 candidates |
+| 融合 | Reciprocal Rank Fusion | RRF k=60 |
+| 候选 | 融合后去重 | 20 |
+| 重排 | `BAAI/bge-reranker-base` CrossEncoder | 权重 0.20 |
+| 输出 | 文档级去重 | Top 5 |
 
-## API 接口
+BM25 属于召回阶段，不是重排器。它依靠词频、逆文档频率和文档长度归一化，擅长匹配错误码、函数名和日志关键词。Dense 召回把查询和文档分别编码成向量，IP 在归一化 BGE 向量上等价于余弦相似度。CrossEncoder 则把“查询 + 候选文档”一起送进模型逐对打分，通常更准但 CPU 延迟明显更高。
 
-| 功能 | 方法 | 路径 | 说明 |
-|------|------|------|------|
-| 健康检查 | GET | `/health` | 服务状态 + Milvus 连接 |
-| 快速对话 | POST | `/api/chat` | 非流式，完整返回 |
-| 流式对话 | POST | `/api/chat_stream` | SSE，支持 tool_call/content/done 事件 |
-| 清空会话 | POST | `/api/chat/clear` | 按 session_id 清理 |
-| AIOps 诊断 | POST | `/api/aiops` | SSE，返回 plan/step_complete/report/complete 事件 |
-| 文件上传 | POST | `/api/upload` | 上传 txt/md + 自动向量化入库 |
-| 告警上报 | POST | `/api/alerts/ingest` | Bearer Token 认证 |
-| 活跃告警 | GET | `/api/alerts/active` | 内存中 status=active 的告警 |
-| 解决告警 | POST | `/api/alerts/{id}/resolve` | 标记 resolved |
-| 心跳上报 | POST | `/api/heartbeat` | Agent 心跳 + 系统快照（含 CPU/内存/进程）|
+这里使用 FLAT 而不是 IVF_FLAT/NLIST，因为当前知识库只有几百个 chunk，精确遍历简单且不会引入近似召回损失。语料扩大到数十万或百万向量后，再比较 HNSW、IVF_FLAT 或 IVF_PQ 的速度、内存和召回率。
 
-## 快速开始
+### 自适应检索
 
-### 环境要求
+1. 对原查询执行 Dense + BM25 + RRF。
+2. 根据诊断标记命中、词汇覆盖、来源集中度和来源可信度计算置信度。
+3. 低置信度时只做一次规则化查询改写并重试，避免无限循环。
+4. 高置信度直接返回；中等置信度使用 CrossEncoder；重试后仍低且无语义证据时拒绝给出确定根因。
+5. 输出检索尝试次数、是否改写、是否重排、证据是否充分，供日志和评测使用。
 
-- Python 3.11+（<3.14）
-- Docker（用于 Milvus 向量数据库）
-- 可访问的 OpenAI 兼容 LLM API（默认 DeepSeek）
+当前阈值：low=0.35、high=0.55、语义证据阈值=0.55。阈值来自当前小型验证集，只应作为起点。
 
-### 安装与启动
+## 模型与基础设施
 
-```bash
-# 1. 安装依赖
+| 用途 | 默认配置 |
+|---|---|
+| 诊断/问答 LLM | `deepseek-v4-flash`（OpenAI-compatible API） |
+| Eval Judge | `deepseek-v4-pro` |
+| Embedding | `BAAI/bge-small-zh-v1.5`，本地运行 |
+| Reranker | `BAAI/bge-reranker-base`，本地运行 |
+| 向量数据库 | Milvus 2.5 + etcd + MinIO，Docker Compose |
+| Agent 编排 | LangGraph Plan-Execute-Replanner |
+| 实时工具 | MCP + psutil + LibreHardwareMonitor |
+
+Milvus 用于同时保存 Dense、BM25 sparse、正文和 JSON metadata，并在同一数据库中执行混合检索。对于更小的 demo，也可以选 FAISS/Chroma；偏关系型业务可选 PostgreSQL + pgvector；托管场景可选 Pinecone、Weaviate、Qdrant 或云厂商向量检索。本项目保留 Milvus，是因为它直接支持当前的 Dense + Sparse + RRF 结构，也便于以后扩容。
+
+## 快速开始（Windows）
+
+要求：Python 3.11–3.13、Docker Desktop、可用的 OpenAI-compatible API key。Docker Desktop 需要先由用户启动；仓库脚本不会可靠地替你启动桌面程序。
+
+```powershell
+git clone https://github.com/zman42586-boop/super_biz_agent_py.git
+cd super_biz_agent_py
+Copy-Item .env.example .env
+# 编辑 .env，至少填写 DASHSCOPE_API_KEY
+
 pip install uv
 uv sync
 
-# 2. 配置 .env（LLM API Key 等，参考 .env 文件内注释）
+docker compose -f vector-database.yml up -d
+docker compose -f vector-database.yml ps
+```
 
-# 3. 启动（Linux/macOS）
-make init    # Docker + MCP + FastAPI + 文档上传
+首次运行会下载 BGE embedding 和 reranker；其中 reranker 约 1.1 GB，CPU 首次加载和推理会比较慢。
 
-# 或 Windows
+启动服务：
+
+```powershell
 .\start-windows.bat
 ```
 
-### 访问
+单独启动监控 Agent：
 
-| 服务 | 地址 |
-|------|------|
-| Web UI | http://localhost:9900 |
-| API 文档 (Swagger) | http://localhost:9900/docs |
-| Monitor MCP | http://localhost:8004/mcp |
-| Milvus Attu (管理 UI) | http://localhost:8000 |
-| MinIO Console | http://localhost:9001 (minioadmin/minioadmin) |
-
-### 调用示例
-
-```bash
-# 健康检查
-curl http://localhost:9900/health
-
-# 快速对话
-curl -X POST "http://localhost:9900/api/chat" \
-  -H "Content-Type: application/json" \
-  -d '{"Id":"session-123","Question":"最近有什么告警？"}'
-
-# AIOps 流式诊断
-curl -X POST "http://localhost:9900/api/aiops" \
-  -H "Content-Type: application/json" \
-  -d '{"session_id":"session-123"}' --no-buffer
+```powershell
+.\.venv\Scripts\python.exe scripts\lhm_alert_agent.py
 ```
 
-## 配置说明
+常用地址：Web/API `http://localhost:9900`，Swagger `http://localhost:9900/docs`，Attu `http://localhost:8000`，Milvus `localhost:19530`。
 
-关键环境变量（`.env`）：
+## 关键配置
 
-```bash
-# LLM（OpenAI 兼容，可切换 DeepSeek/DashScope/OpenAI）
-DASHSCOPE_API_KEY=sk-xxx
-DASHSCOPE_API_BASE=https://api.deepseek.com/v1
-DASHSCOPE_MODEL=deepseek-chat
-DASHSCOPE_EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
+完整模板见 `.env.example`。当前核心 RAG 参数也可通过环境变量覆盖：
 
-# Milvus
-MILVUS_HOST=localhost
-MILVUS_PORT=19530
+```dotenv
+RAG_TOP_K=5
+RAG_DENSE_CANDIDATES=20
+RAG_SPARSE_CANDIDATES=20
+RAG_RERANK_CANDIDATES=20
+RAG_RRF_K=60
+RAG_RERANKER_WEIGHT=0.20
+RAG_CONFIDENCE_LOW=0.35
+RAG_CONFIDENCE_HIGH=0.55
+RAG_SEMANTIC_EVIDENCE_THRESHOLD=0.55
+CHUNK_MAX_TOKENS=420
+CHUNK_OVERLAP_TOKENS=64
+```
 
-# RAG
-RAG_TOP_K=3
-CHUNK_MAX_SIZE=800
-CHUNK_OVERLAP=100
+MATLAB 监控示例：
 
-# MCP（本机 Monitor）
-MCP_MONITOR_URL=http://localhost:8004/mcp
-
-# SMTP 告警邮件
-SMTP_HOST=smtp.163.com
-SMTP_PORT=465
-SMTP_USER=xxx@163.com
-SMTP_PASS=xxx
-SMTP_TO=xxx@163.com
-
-# 告警 Webhook Token
-ALERT_WEBHOOK_TOKEN=your_token_here
-
-# OnCall 温度告警
-ONCALL_TEMP_THRESHOLD_C=50
-ONCALL_TEMP_DURATION_SEC=60
-ONCALL_TEMP_COOLDOWN_SEC=120
-ONCALL_HEARTBEAT_TIMEOUT_SEC=60
-ONCALL_AUTO_DIAGNOSIS=true
-EMERGENCY_SNAPSHOT_TEMP_C=85
-
-# 进程监控（检测 MATLAB 等长时间运行进程的崩溃）
+```dotenv
+POLL_INTERVAL_SEC=5
 ONCALL_MONITOR_PROCESS=MATLAB.exe
-ONCALL_MONITOR_CRASH_DIR=%APPDATA%\MathWorks\MATLAB\CrashDumps
+ONCALL_MONITOR_CRASH_DIR=C:\Users\YOUR_NAME\AppData\Roaming\MathWorks\MATLAB\CrashDumps
 ONCALL_MONITOR_CRASH_PATTERN=matlab_crash_dump.*
+ONCALL_TEMP_ENABLED=false
 ```
 
-## 分层记忆系统
+## 评测与已验证结果
 
-```
-memory/
-├── MEMORY.md        # Hot 层：最近 20 条诊断索引表格（摘要 + 报告链接）
-│                    #   由 Planner/RAG Agent 每轮加载注入 Prompt
-├── incidents/       # Cold 层：完整诊断报告 (*.md)
-│                    #   每次 AIOps 完成后由 MemoryWriter 自动写入
-│                    #   同时自动索引到 Milvus 供后续召回
-├── artifacts/       # 归档层：Microcompact 压缩的工具原始结果
-│                    #   按 session_id 分目录存储
-└── emergency/       # 紧急快照：温度 ≥ 85°C 时 lhm_alert_agent 写入
-                     #   last_breath.json 含 CPU/内存/进程快照
+运行单元/集成测试：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest --no-cov
 ```
 
-## Skill 系统
+运行真实 Milvus 检索对照和自适应评测：
 
-在 `.claude/skills/` 目录下创建 Markdown 文件，格式：
-
-```markdown
----
-id: cpu_high_diagnosis
-name: CPU 高使用率诊断流程
-description: 当 CPU 使用率超过 80% 时的标准诊断步骤
----
-
-## 排查步骤
-
-1. 使用 query_cpu_metrics 获取 CPU 使用率趋势
-2. 使用 search_log 检查错误日志
-3. 使用 query_memory_metrics 排除内存压力
-...
+```powershell
+.\.venv\Scripts\python.exe -m tests.eval_retrieval_v2
+.\.venv\Scripts\python.exe -m tests.eval_adaptive_retrieval
 ```
 
-Planner 会在制定诊断计划时自动加载所有 Skill，优先匹配标准流程。
+### 第一轮：固定检索链对照（40 queries）
 
-## MCP 工具
+| 方案 | Recall@5 | Precision@5 | MRR | nDCG@5 | Hit@1 |
+|---|---:|---:|---:|---:|---:|
+| Dense 原查询 | 68.33% | 30.00% | 0.8121 | 0.6710 | 75.00% |
+| Dense + 查询扩展 | 76.67% | 34.50% | 0.8600 | 0.7589 | 82.50% |
+| Dense + BM25 + RRF | 82.92% | 37.00% | **0.8875** | 0.8057 | **85.00%** |
+| Hybrid + CrossEncoder(0.20) | **83.75%** | **37.50%** | 0.8833 | **0.8103** | **85.00%** |
 
-### Monitor MCP Server (monitor_server.py)
+CrossEncoder 平均总延迟约 4.86 秒，而不重排的 Hybrid 约 34 毫秒。因此第二轮没有对所有查询无条件重排。
 
-| 工具 | 功能 |
-|------|------|
-| `query_cpu_metrics` | 查询本机 CPU 使用率（psutil 实时数据） |
-| `query_memory_metrics` | 查询本机内存使用率 |
-| `list_lhm_sensors` | 列出 LibreHardwareMonitor 所有温度传感器 |
-| `get_lhm_temperature` | 获取匹配传感器的当前温度 |
+### 第二轮：自适应检索（40 answerable + 10 no-answer）
 
-## 本地工具
+| 指标 | 结果 |
+|---|---:|
+| Recall@5 | 85.00% |
+| Precision@5 | 38.00% |
+| MRR | 0.8979 |
+| nDCG@5 | 0.8204 |
+| Hit@1 | 85.00% |
+| 不可回答查询正确拒答率 | 100.00% |
+| 可回答查询低置信度误拒率 | 2.50% |
+| 查询重试率 | 46.00% |
+| CrossEncoder 使用率 | 56.00% |
+| 平均 / P95 延迟 | 4.30s / 6.84s |
 
-| 工具 | 功能 |
-|------|------|
-| `retrieve_knowledge` | 从 Milvus 向量库检索相关知识文档 |
-| `get_current_time` | 获取当前时间（支持指定时区） |
-| `search_log` | 检索本地 `logs/app_*.log` 运行日志 |
+这里的 100% 只表示这 10 条人工构造的 out-of-domain 查询全部被拒答，不代表真实环境 100% 准确。当前集合规模很小，而且开发集与留出集属于相同故障类别，后续应增加真实 dump、跨版本 MATLAB 日志、难负例，并由不同人员盲标。
 
-## 开发
+### LLM-as-Judge
 
-```bash
-make help       # 查看所有命令
-make dev        # 开发模式（热重载）
-make test       # 运行测试 + 覆盖率
-make format     # 代码格式化 (ruff)
-make lint       # 代码检查
-make eval       # AIOps Eval 评分 (RAG检索 + LLM输出)
+`tests/eval_runner.py` 先完成检索和诊断，再调用 `EVAL_JUDGE_MODEL` 独立评分：根因准确性 0–4、证据引用 0–3、建议可操作性 0–3。Judge 是生成质量评测，不应与 Recall@K 等检索指标混为一谈，也不能替代人工验收。
+
+## 目录说明
+
+```text
+app/                      FastAPI、LangGraph、RAG、告警和工具代码
+aiops-docs/               MATLAB 官方摘要与公开案例知识文档
+oncall_knowledge_docs_50/ 通用 OnCall 文档
+scripts/lhm_alert_agent.py 本机主动轮询 Agent
+mcp_servers/              CPU/内存/温度 MCP 工具
+memory/                   历史诊断、索引摘要、工具归档与紧急快照
+tests/                    单元测试、检索评测、生成评测和场景数据
+vector-database.yml       Milvus/etcd/MinIO/Attu
 ```
 
-## Agent 评估体系 (Eval Harness)
+## 已知限制
 
-基于 8 个合成崩溃场景的自动化质量评测，覆盖 RAG 检索与 LLM 生成两端：
+- 监控基于主动轮询，最坏检测延迟接近一个轮询周期；Agent 自身停止时依赖服务端心跳超时发现。
+- “进程消失”不等于一定崩溃，用户正常退出也可能触发；是否为 crash 仍需 dump/事件日志佐证。
+- 当前 CPU/内存主要是系统级和进程快照，不是 MATLAB 内部 profiler 指标。
+- 温度依赖 LibreHardwareMonitor；未启动其 Web Server 时不会获得温度。
+- 本地 CrossEncoder 在 CPU 上延迟较高；生产化可考虑 ONNX/量化、GPU 或更小的 reranker。
+- 知识库中的案例是公开资料整理与合成 runbook，不能替代组织自己的真实事故数据。
 
-```bash
-make eval         # 全量 8 场景
-make eval-one SID=01  # 单场景
-```
+## 安全
 
-### 检索评测（纯向量计算，不调 LLM）
+`.env`、模型缓存、Milvus volume、日志和评测结果均被 Git 忽略。不要提交 API key、SMTP 授权码、真实客户日志或 crash dump。曾在聊天、终端或提交历史中暴露过的 key 应立即在供应商控制台轮换。
 
-| 指标 | 含义 |
-|------|------|
-| **Recall@K** | 标注文档中被检索到的比例 — 测"覆盖面" |
-| **Precision@K** | 返回文档中相关文档的比例 — 测"噪声率" |
-| **MRR** | 第一个相关文档的排名倒数 — 测"排序质量" |
+## License
 
-### 生成评测（LLM-as-Judge）
-
-结构化评分量规（Structured Output, temperature=0）：
-
-| 子维度 | 分值 | 评估标准 |
-|--------|:--:|------|
-| 根因准确性 | 0-4 | 是否准确识别了真实根因 |
-| 证据引用 | 0-3 | 是否引用了具体数据/调用栈/日志 |
-| 建议可操作性 | 0-3 | 处理建议是否具体可执行 |
-
-总分 0-10，每次跑完自动存 `.last_eval_score`，下次跑显示对比值。
-
-场景定义在 `tests/eval_scenarios/scenario_XX.json`，每个场景含虚拟告警 payload + `expected` 期望关键词 + `relevant_docs` 应检索文档。
-
-## 许可证
-
-MIT License
-
-author: chief
+MIT

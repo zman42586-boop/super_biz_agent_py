@@ -1,24 +1,17 @@
-import os
-from pathlib import Path
-
-from dotenv import load_dotenv
+from app.config import Settings
 
 
-def test_smtp_env_present() -> None:
-    project_root = Path(__file__).resolve().parents[1]
-    load_dotenv(project_root / ".env", override=False)
+def test_smtp_env_is_parsed_without_real_credentials(monkeypatch) -> None:
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("SMTP_PORT", "2465")
+    monkeypatch.setenv("SMTP_USER", "sender@example.com")
+    monkeypatch.setenv("SMTP_PASS", "test-password")
+    monkeypatch.setenv("SMTP_TO", "receiver@example.com")
 
-    required = [
-        "SMTP_HOST",
-        "SMTP_PORT",
-        "SMTP_USER",
-        "SMTP_PASS",
-        "SMTP_TO",
-    ]
+    settings = Settings(_env_file=None)
 
-    missing = [k for k in required if not (os.getenv(k) or "").strip()]
-    assert not missing, f"Missing env vars: {missing}"
-
-    port = int((os.getenv("SMTP_PORT") or "").strip())
-    assert 1 <= port <= 65535
+    assert settings.smtp_host == "smtp.example.com"
+    assert settings.smtp_port == 2465
+    assert settings.smtp_user == "sender@example.com"
+    assert settings.smtp_to == "receiver@example.com"
 

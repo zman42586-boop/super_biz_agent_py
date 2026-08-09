@@ -169,7 +169,7 @@ class AIOpsService:
 
             # 长期记忆：将诊断结果写入 memory/incidents/
             # 必须在 yield complete 之前执行，否则上层生成器 break 会导致保存不执行
-            if final_response:
+            if final_response and not session_id.startswith("alert_eval_"):
                 try:
                     await memory_writer.save_incident(
                         session_id=session_id,
@@ -349,6 +349,8 @@ class AIOpsService:
 
             请基于以上真实告警数据，结合知识库经验和可用监控工具，
             分析告警根因并生成完整的诊断报告。报告格式要求同标准 AIOps 报告模板。
+            报告必须分别列出：已观测事实、知识库证据、分析推断、处理建议。
+            只有事实与证据能共同支持时才能给出确定根因；否则写“原因未确定”并列出待补充证据。
         """).strip()
 
         session_id = f"alert_{alert.alert_id}"

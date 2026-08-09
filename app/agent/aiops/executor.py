@@ -80,6 +80,7 @@ async def executor(state: PlanExecuteState) -> Dict[str, Any]:
 注意：
 - 如果工具调用失败，请说明失败原因
 - 不要编造数据，只返回实际获取的信息
+- 严格区分日志事实、知识库证据和分析推断；证据不足时明确写“原因未确定”
 - 执行结果要清晰、准确
 - 专注于当前步骤，不要考虑其他任务"""),
             HumanMessage(content=f"请执行以下任务: {task}")

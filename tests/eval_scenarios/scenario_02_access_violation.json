@@ -34,6 +34,7 @@
   "relevant_docs": [
     "matlab_access_violation_guide",
     "matlab_error_codes_reference",
-    "matlab_mex_crash_guide"
+    "matlab_mex_crash_guide",
+    "matlab_official_mex_crash_runbook"
   ]
 }

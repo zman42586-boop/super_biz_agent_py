@@ -6,6 +6,8 @@ from pymilvus import (
     CollectionSchema,
     DataType,
     FieldSchema,
+    Function,
+    FunctionType,
     MilvusClient,
     connections,
     utility,
@@ -48,7 +50,7 @@ class MilvusClientManager:
     COLLECTION_NAME: str = "biz"
     VECTOR_DIM: int = 512  # bge-small-zh-v1.5 输出维度
     ID_MAX_LENGTH: int = 100
-    CONTENT_MAX_LENGTH: int = 8000
+    CONTENT_MAX_LENGTH: int = 16000
     DEFAULT_SHARD_NUMBER: int = 2
 
     def __init__(self) -> None:
@@ -99,28 +101,17 @@ class MilvusClientManager:
                 logger.info(f"collection '{self.COLLECTION_NAME}' 已存在")
                 self._collection = Collection(self.COLLECTION_NAME)
                 
-                # 检查向量维度是否匹配
+                # 旧版 collection 只有 vector；新版要求 dense+sparse+BM25。
                 schema = self._collection.schema
-                vector_field = None
-                existing_dim = None
-                for field in schema.fields:
-                    if field.name == "vector":
-                        vector_field = field
-                        break
-                
-                if vector_field and hasattr(vector_field, 'params') and 'dim' in vector_field.params:
-                    existing_dim = vector_field.params['dim']
-                    if existing_dim != self.VECTOR_DIM:
-                        logger.warning(
-                            f"检测到向量维度不匹配！当前 collection 维度: {existing_dim}, 配置维度: {self.VECTOR_DIM}"
-                        )
-                        logger.info(f"正在删除旧 collection '{self.COLLECTION_NAME}'...")
-                        _ = utility.drop_collection(self.COLLECTION_NAME)
-                        logger.info(f"正在重新创建 collection '{self.COLLECTION_NAME}'...")
-                        self._create_collection()
-                        logger.info(f"成功重新创建 collection，维度: {self.VECTOR_DIM}")
-                    else:
-                        logger.info(f"向量维度匹配: {self.VECTOR_DIM}")
+                fields = {field.name: field for field in schema.fields}
+                dense = fields.get("dense")
+                existing_dim = dense.params.get("dim") if dense is not None else None
+                required = {"id", "dense", "sparse", "content", "metadata"}
+                if not required.issubset(fields) or existing_dim != self.VECTOR_DIM:
+                    logger.warning("检测到旧版 Milvus schema，重建为 Dense + BM25")
+                    self._collection.release()
+                    _ = utility.drop_collection(self.COLLECTION_NAME)
+                    self._create_collection()
 
             # 加载 collection
             self._load_collection()
@@ -157,14 +148,17 @@ class MilvusClientManager:
                 is_primary=True,
             ),
             FieldSchema(
-                name="vector",
+                name="dense",
                 dtype=DataType.FLOAT_VECTOR,
                 dim=self.VECTOR_DIM,
             ),
+            FieldSchema(name="sparse", dtype=DataType.SPARSE_FLOAT_VECTOR),
             FieldSchema(
                 name="content",
                 dtype=DataType.VARCHAR,
                 max_length=self.CONTENT_MAX_LENGTH,
+                enable_analyzer=True,
+                analyzer_params={"type": "chinese"},
             ),
             FieldSchema(
                 name="metadata",
@@ -172,10 +166,16 @@ class MilvusClientManager:
             ),
         ]
 
-        # 创建 schema
+        bm25_function = Function(
+            name="content_bm25",
+            function_type=FunctionType.BM25,
+            input_field_names=["content"],
+            output_field_names=["sparse"],
+        )
         schema = CollectionSchema(
             fields=fields,
-            description="Business knowledge collection",
+            functions=[bm25_function],
+            description="MATLAB AIOps knowledge: dense + BM25 sparse",
             enable_dynamic_field=False,
         )
 
@@ -190,22 +190,23 @@ class MilvusClientManager:
         self._create_index()
 
     def _create_index(self) -> None:
-        """为 vector 字段创建索引"""
+        """小语料 dense 使用 FLAT 精确检索，sparse 使用 BM25 倒排索引。"""
         if self._collection is None:
             raise RuntimeError("Collection 未初始化")
 
-        index_params = {
-            "metric_type": "L2",  # 欧氏距离
-            "index_type": "IVF_FLAT",
-            "params": {"nlist": 128},
-        }
-
         _ = self._collection.create_index(
-            field_name="vector",
-            index_params=index_params,
+            field_name="dense",
+            index_params={"metric_type": "IP", "index_type": "FLAT", "params": {}},
         )
-
-        logger.info("成功为 vector 字段创建索引")
+        _ = self._collection.create_index(
+            field_name="sparse",
+            index_params={
+                "metric_type": "BM25",
+                "index_type": "SPARSE_INVERTED_INDEX",
+                "params": {"inverted_index_algo": "DAAT_MAXSCORE"},
+            },
+        )
+        logger.info("成功创建 dense FLAT 与 sparse BM25 索引")
 
     def _load_collection(self) -> None:
         """加载 collection 到内存"""

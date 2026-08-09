@@ -17,6 +17,7 @@ dependencies = [
     "openai>=1.10.0",
     "langchain-huggingface>=0.1.0",
     "sentence-transformers>=2.2.0",
+    "transformers>=4.45.0",
     "pymilvus>=2.3.5",
     "pydantic>=2.5.0,<3.0.0",
     "pydantic-settings>=2.1.0",

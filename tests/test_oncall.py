@@ -65,16 +65,21 @@ def test_config_smtp_fields():
 
     assert config.smtp_host == "smtp.163.com"
     assert config.smtp_port == 465
-    assert config.smtp_user != ""
-    assert config.oncall_temp_threshold_c == 50.0
+    assert isinstance(config.smtp_user, str)
+    assert config.oncall_temp_threshold_c == 85.0
     assert config.oncall_temp_duration_sec == 60
     assert config.oncall_temp_cooldown_sec == 120
 
 
 # ── 3. SMTP 发送服务（mock SMTP_SSL，不真实发送）──────────────────────
 
-def test_send_alert_email_success():
+def test_send_alert_email_success(monkeypatch):
     from app.services.mail_service import send_alert_email
+    from app.services import mail_service
+
+    monkeypatch.setattr(mail_service.config, "smtp_user", "sender@example.com")
+    monkeypatch.setattr(mail_service.config, "smtp_pass", "test-password")
+    monkeypatch.setattr(mail_service.config, "smtp_to", "receiver@example.com")
 
     mock_server = MagicMock()
     mock_ctx = MagicMock()
@@ -167,7 +172,10 @@ async def test_alert_service_dedup():
         evidence=AlertEvidence(),
     )
 
-    with patch("app.services.alert_service.asyncio.create_task", return_value=MagicMock()):
+    with patch(
+        "app.services.alert_service.asyncio.create_task",
+        side_effect=lambda coroutine: (coroutine.close(), MagicMock())[1],
+    ):
         rec1, is_new1 = await svc.ingest(req)
         rec2, is_new2 = await svc.ingest(req)
 
@@ -195,7 +203,10 @@ async def test_alert_service_resolve():
         ts="2026-05-08T00:00:00+08:00",
         evidence=AlertEvidence(),
     )
-    with patch("app.services.alert_service.asyncio.create_task", return_value=MagicMock()):
+    with patch(
+        "app.services.alert_service.asyncio.create_task",
+        side_effect=lambda coroutine: (coroutine.close(), MagicMock())[1],
+    ):
         rec, _ = await svc.ingest(req)
 
     resolved = svc.resolve(rec.alert_id)

@@ -36,6 +36,7 @@
   "relevant_docs": [
     "matlab_out_of_memory_guide",
     "matlab_error_codes_reference",
-    "matlab_profiler_guide"
+    "matlab_profiler_guide",
+    "matlab_official_memory_oom_runbook"
   ]
 }

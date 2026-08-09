@@ -1,0 +1,58 @@
+[
+  {"category":"stack_overflow","queries":[
+    {"text":"MATLAB 突然退出，崩溃日志显示 stack_overflow，调用栈中同一个递归函数重复出现","relevant_docs":["matlab_stack_overflow_guide.md","matlab_error_codes_reference.md"]},
+    {"text":"递归函数没有终止条件导致 MATLAB 栈溢出，如何用 dbstack 定位","relevant_docs":["matlab_stack_overflow_guide.md","matlab_profiler_guide.md"]},
+    {"text":"运行深度递归算法后进程消失，错误码 stack overflow","relevant_docs":["matlab_stack_overflow_guide.md","matlab_error_codes_reference.md"]},
+    {"text":"MATLAB crash dump 提示栈空间耗尽，函数调用层级持续增加","relevant_docs":["matlab_stack_overflow_guide.md","matlab_error_codes_reference.md"]},
+    {"text":"迭代可以运行但递归版本让 MATLAB 崩溃，如何排查调用深度","relevant_docs":["matlab_stack_overflow_guide.md","matlab_profiler_guide.md"]}
+  ]},
+  {"category":"access_violation","queries":[
+    {"text":"MATLAB 崩溃日志出现 EXCEPTION_ACCESS_VIOLATION，故障模块是自定义 mexw64","relevant_docs":["matlab_access_violation_guide.md","matlab_mex_crash_guide.md","matlab_official_mex_crash_runbook.md"]},
+    {"text":"MEX 调用 mxGetPr 后访问空指针，MATLAB 直接退出","relevant_docs":["matlab_access_violation_guide.md","matlab_mex_crash_guide.md","matlab_official_mex_crash_runbook.md"]},
+    {"text":"Windows 事件查看器显示 0xc0000005，matlab.exe 访问违规","relevant_docs":["matlab_access_violation_guide.md","matlab_error_codes_reference.md","case_windows_event_1000_matlab_crash.md"]},
+    {"text":"第三方 MEX 文件造成 segmentation violation，怎样定位非法内存访问","relevant_docs":["matlab_access_violation_guide.md","matlab_mex_crash_guide.md","matlab_official_mex_crash_runbook.md"]},
+    {"text":"MATLAB crash dump 中 faulting module 为 native extension，疑似野指针","relevant_docs":["matlab_access_violation_guide.md","matlab_mex_crash_guide.md","matlab_official_mex_crash_runbook.md"]}
+  ]},
+  {"category":"out_of_memory","queries":[
+    {"text":"MATLAB 报 Out of Memory，加载大矩阵时系统内存达到 98%","relevant_docs":["matlab_out_of_memory_guide.md","matlab_official_memory_oom_runbook.md","matlab_error_codes_reference.md"]},
+    {"text":"创建超大数组失败，日志显示 cannot allocate memory，如何释放工作区","relevant_docs":["matlab_out_of_memory_guide.md","matlab_official_memory_oom_runbook.md"]},
+    {"text":"批量读取 CSV 导致 OOM，是否应该改用 datastore 或 tall array","relevant_docs":["case_large_csv_datastore.md","matlab_out_of_memory_guide.md","matlab_official_memory_oom_runbook.md"]},
+    {"text":"MATLAB 内存不足并异常退出，如何检查 whos 和数组预分配","relevant_docs":["matlab_out_of_memory_guide.md","matlab_official_memory_oom_runbook.md"]},
+    {"text":"处理大型 MAT 文件时 RAM 耗尽，想改成分块加载避免崩溃","relevant_docs":["case_large_mat_partial_loading.md","matlab_out_of_memory_guide.md","matlab_official_memory_oom_runbook.md"]}
+  ]},
+  {"category":"mex_crash","queries":[
+    {"text":"调用自编译 C++ MEX 后 MATLAB 秒退，没有普通 m 文件异常","relevant_docs":["matlab_mex_crash_guide.md","matlab_official_mex_crash_runbook.md"]},
+    {"text":"mexw64 模块崩溃，怀疑 mxMalloc 与 mxFree 配对错误","relevant_docs":["matlab_mex_crash_guide.md","matlab_access_violation_guide.md","matlab_official_mex_crash_runbook.md"]},
+    {"text":"升级 MATLAB 后旧 MEX 二进制不兼容导致进程退出","relevant_docs":["matlab_mex_crash_guide.md","matlab_official_mex_crash_runbook.md"]},
+    {"text":"原生扩展重复释放内存，怎样用独立 MATLAB 进程隔离复现","relevant_docs":["matlab_mex_crash_guide.md","matlab_access_violation_guide.md","matlab_official_mex_crash_runbook.md"]},
+    {"text":"只有执行某个 MEX 函数时才出现访问违规和 native stack","relevant_docs":["matlab_mex_crash_guide.md","matlab_access_violation_guide.md","matlab_official_mex_crash_runbook.md"]}
+  ]},
+  {"category":"memory_leak","queries":[
+    {"text":"MATLAB 长时间运行时内存占用持续爬升，最终 OOM","relevant_docs":["memory_high_usage.md","matlab_out_of_memory_guide.md","matlab_official_memory_oom_runbook.md"]},
+    {"text":"循环任务每轮都增加 RAM，clear 以后仍未完全回收","relevant_docs":["memory_high_usage.md","matlab_out_of_memory_guide.md","matlab_profiler_guide.md"]},
+    {"text":"服务运行数小时后内存从 2GB 增长到 30GB，疑似句柄泄漏","relevant_docs":["memory_high_usage.md","matlab_out_of_memory_guide.md"]},
+    {"text":"MATLAB worker 内存缓慢上涨，需要定位动态扩容和未释放对象","relevant_docs":["memory_high_usage.md","matlab_out_of_memory_guide.md","matlab_profiler_guide.md"]},
+    {"text":"没有瞬时大数组，但进程内存趋势持续上升并最终崩溃","relevant_docs":["memory_high_usage.md","matlab_out_of_memory_guide.md","matlab_official_memory_oom_runbook.md"]}
+  ]},
+  {"category":"high_cpu","queries":[
+    {"text":"MATLAB CPU 连续十分钟 100%，界面无响应但进程仍存在","relevant_docs":["cpu_high_usage.md","matlab_profiler_guide.md","matlab_official_cpu_performance_runbook.md"]},
+    {"text":"计算任务占满所有核心，如何用 profile viewer 找热点函数","relevant_docs":["matlab_profiler_guide.md","matlab_official_cpu_performance_runbook.md"]},
+    {"text":"for 循环导致高 CPU，想比较向量化、parfor 和 timeit","relevant_docs":["matlab_profiler_guide.md","matlab_official_cpu_performance_runbook.md"]},
+    {"text":"MATLAB 没有崩溃但负载长期过高，需要区分正常计算和死循环","relevant_docs":["cpu_high_usage.md","matlab_profiler_guide.md","matlab_official_cpu_performance_runbook.md"]},
+    {"text":"轮询发现 matlab.exe CPU 95%，怎样采集 profiler 证据","relevant_docs":["cpu_high_usage.md","matlab_profiler_guide.md","matlab_official_cpu_performance_runbook.md"]}
+  ]},
+  {"category":"gpu_crash","queries":[
+    {"text":"MATLAB 使用 gpuArray 时显存耗尽，报 CUDA out of memory","relevant_docs":["case_matlab_gpu_out_of_memory.md"]},
+    {"text":"绘图后 MATLAB 闪退，崩溃模块指向 NVIDIA 显卡驱动","relevant_docs":["case_matlab_graphics_driver_crash.md"]},
+    {"text":"Linux 日志出现 NVIDIA Xid，随后 MATLAB GPU 计算进程消失","relevant_docs":["case_nvidia_xid_matlab_gpu_crash.md"]},
+    {"text":"深度学习训练占满 VRAM 后 MATLAB 退出，如何 reset gpuDevice","relevant_docs":["case_matlab_gpu_out_of_memory.md"]},
+    {"text":"切换软件 OpenGL 后不再崩溃，怀疑图形驱动兼容问题","relevant_docs":["case_matlab_graphics_driver_crash.md"]}
+  ]},
+  {"category":"process_exit","queries":[
+    {"text":"上次轮询 MATLAB 存在，这次进程消失，但没有找到 crash dump","relevant_docs":["matlab_error_codes_reference.md","case_windows_wer_localdump_matlab.md"]},
+    {"text":"matlab.exe 无提示退出，应该检查 Windows Event 1000 和退出码","relevant_docs":["case_windows_event_1000_matlab_crash.md","matlab_error_codes_reference.md"]},
+    {"text":"如何为 MATLAB 配置 Windows Error Reporting LocalDumps","relevant_docs":["case_windows_wer_localdump_matlab.md"]},
+    {"text":"进程异常结束但日志目录为空，需要收集事件查看器证据","relevant_docs":["case_windows_event_1000_matlab_crash.md","case_windows_wer_localdump_matlab.md"]},
+    {"text":"无法判断用户手动关闭还是崩溃，如何结合退出码和 WER 排查","relevant_docs":["matlab_error_codes_reference.md","case_windows_wer_localdump_matlab.md"]}
+  ]}
+]

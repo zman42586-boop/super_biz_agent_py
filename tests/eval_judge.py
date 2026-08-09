@@ -1,6 +1,6 @@
 """LLM-as-Judge — 用 LLM 给 AIOps 诊断报告打分。
 
-复用 llm_factory 的 deepseek-chat，通过 Structured Output 返回
+使用独立 Judge 模型，通过 Structured Output 返回
 评分 (0-10) + 子维度分 + 评价。供 eval_runner.py 调用。
 """
 
@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.config import config
 from app.core.llm_factory import llm_factory
 
 
@@ -69,7 +70,13 @@ async def judge_report(scenario: dict[str, Any], report: str) -> EvalScore:
         report=report[:6000],  # 限制长度，避免超模型上下文
     )
 
-    llm = llm_factory.create_chat_model(temperature=0, streaming=False)
+    llm = llm_factory.create_chat_model(
+        model=config.eval_judge_model,
+        temperature=0,
+        streaming=False,
+        extra_body={"thinking": {"type": "disabled"}},
+        max_tokens=256,
+    )
     judge_chain = llm.with_structured_output(EvalScore, method="function_calling")
     result = await judge_chain.ainvoke(prompt)
 

@@ -24,6 +24,8 @@ class LLMFactory:
         streaming: bool = True,
         base_url: str | None = None,
         api_key: str | None = None,
+        extra_body: dict | None = None,
+        max_tokens: int | None = None,
     ) -> ChatOpenAI:
         model = model or config.dashscope_model
         base_url = base_url or config.dashscope_api_base
@@ -35,6 +37,8 @@ class LLMFactory:
             streaming=streaming,
             base_url=base_url,
             api_key=api_key,
+            extra_body=extra_body,
+            max_tokens=max_tokens,
         )
 
         return llm

@@ -21,7 +21,7 @@ NC = \033[0m
         install install-dev dev run test test-quick format lint fix type-check \
         security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
-        start-monitor stop-monitor start-api stop-api status-mcp eval eval-one
+        start-monitor stop-monitor start-api stop-api status-mcp eval eval-one eval-retrieval eval-adaptive eval-generation-offline
 
 # ============================================================
 # 默认目标：显示帮助信息
@@ -73,6 +73,9 @@ help:
 	@echo "  $(YELLOW)make fix$(NC)          - 🔧 自动修复问题"
 	@echo "  $(YELLOW)make test$(NC)         - 🧪 运行测试"
 	@echo "  $(YELLOW)make eval$(NC)         - 🤖 AIOps Eval 评分"
+	@echo "  $(YELLOW)make eval-retrieval$(NC) - 🔎 离线检索基线/优化对照"
+	@echo "  $(YELLOW)make eval-adaptive$(NC) - 🧭 真实 Milvus 自适应检索与拒答评测"
+	@echo "  $(YELLOW)make eval-generation-offline$(NC) - 🧠 离线 RAG + LLM-as-Judge"
 	@echo "  $(YELLOW)make check-all$(NC)    - ✅ 运行所有检查"
 	@echo ""
 	@echo "$(CYAN)【其他】$(NC)"
@@ -562,11 +565,23 @@ watch:  ## 监视文件变化并自动运行测试
 
 eval:  ## 跑 AIOps eval 评分
 	@echo "$(YELLOW)🤖 运行 AIOps Eval...$(NC)"
-	.venv/bin/python tests/eval_runner.py
+	.venv/bin/python -m tests.eval_runner
 
 eval-one:  ## 跑单个 eval 场景 (用法: make eval-one SID=01)
 	@echo "$(YELLOW)🤖 运行 AIOps Eval scenario_$(SID)...$(NC)"
-	.venv/bin/python tests/eval_runner.py --scenario $(SID)
+	.venv/bin/python -m tests.eval_runner --scenario $(SID)
+
+eval-retrieval:  ## 使用真实 Milvus，运行 Dense/Hybrid/CrossEncoder 对照评测
+	@echo "$(YELLOW)🔎 运行真实 Milvus 检索对照 Eval...$(NC)"
+	.venv/bin/python -m tests.eval_retrieval_v2
+
+eval-adaptive:  ## 运行自适应检索、拒答与延迟评测
+	@echo "$(YELLOW)🧭 运行自适应检索 Eval...$(NC)"
+	.venv/bin/python -m tests.eval_adaptive_retrieval
+
+eval-generation-offline:  ## 本地检索后调用配置的 LLM 生成诊断并评分
+	@echo "$(YELLOW)🧠 运行离线 RAG + LLM-as-Judge...$(NC)"
+	.venv/bin/python -m tests.eval_generation_offline --top-k 5
 
 logs:  ## 查看服务日志
 	@echo "$(YELLOW)📜 查看服务日志...$(NC)"

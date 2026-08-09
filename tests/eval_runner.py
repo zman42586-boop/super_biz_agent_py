@@ -1,8 +1,8 @@
 """AIOps Eval Runner — 跑全部 eval 场景，输出两套评分报告。
 
 用法:
-    .venv/Scripts/python.exe tests/eval_runner.py
-    .venv/Scripts/python.exe tests/eval_runner.py --scenario 01   # 只跑一个
+    .venv/Scripts/python.exe -m tests.eval_runner
+    .venv/Scripts/python.exe -m tests.eval_runner --scenario 01   # 只跑一个
     make eval
 
 评测维度:
@@ -60,9 +60,9 @@ def build_alert_record(scenario: dict) -> AlertRecord:
 async def run_one(scenario: dict) -> tuple[dict, str | None, EvalScore | None, dict | None]:
     """跑单个场景，返回 (scenario, report, judge_score, retrieval_metrics)。"""
     alert = build_alert_record(scenario)
+    retrieval = compute_metrics(scenario, top_k=5)
     report = await aiops_service.execute_alert_diagnosis(alert)
     score = await judge_report(scenario, report)
-    retrieval = compute_metrics(scenario, top_k=5)
     return scenario, report, score, retrieval
 
 
@@ -74,15 +74,15 @@ async def run_all(scenarios: list[dict]) -> list[tuple[dict, str | None, EvalSco
         try:
             _, report, score, retrieval = await run_one(sc)
             elapsed = time.monotonic() - start
-            emoji = "✅" if (score and score.score >= 7) else ("⚠️" if (score and score.score >= 4) else "❌")
+            status = "PASS" if (score and score.score >= 7) else ("WARN" if (score and score.score >= 4) else "FAIL")
             r_info = ""
             if retrieval and not retrieval.get("skipped", True):
                 r_info = f"R@{retrieval['recall_at_k']:.0%} MRR={retrieval['mrr']:.0%}"
-            print(f"{emoji} {score.score}/10  {r_info}  ({elapsed:.0f}s)")
+            print(f"{status} {score.score}/10  {r_info}  ({elapsed:.0f}s)")
             results.append((sc, report, score, retrieval))
         except Exception as e:
             elapsed = time.monotonic() - start
-            print(f"❌ 异常 ({elapsed:.0f}s): {e}")
+            print(f"ERROR ({elapsed:.0f}s): {e}")
             results.append((sc, "", EvalScore(score=0, accuracy=0, evidence=0, actionable=0, comment=str(e)), None))
     return results
 
@@ -97,10 +97,10 @@ def print_report(
     # ── LLM-as-Judge ──
     print()
     print("=" * 82)
-    print("  AIOps Eval — LLM-as-Judge (诊断报告质量)")
+    print("  AIOps Eval - LLM-as-Judge (诊断报告质量)")
     print("=" * 82)
     print(f"  {'场景':<28} {'总分':>4}  {'A':>1}/{'E':>1}/{'A':>1}  备注")
-    print(f"  {'─'*28}  {'───':>4}  {'─'*7}  {'─'*24}")
+    print(f"  {'-'*28}  {'---':>4}  {'-'*7}  {'-'*24}")
     judge_total = 0
     judge_count = 0
     for sc, _, score, _ in results:
@@ -112,28 +112,28 @@ def print_report(
         judge_total += score.score
         judge_count += 1
     judge_avg = judge_total / max(judge_count, 1)
-    print(f"  {'─'*82}")
+    print(f"  {'-'*82}")
     print(f"  LLM-as-Judge 平均: {judge_avg:.1f}/10  "
           f"通过率(>=5): {sum(1 for _, _, s, _ in results if s and s.score >= 5)/max(judge_count,1)*100:.0f}%")
     if prev_judge_avg is not None:
         delta = judge_avg - prev_judge_avg
-        sym = "↑" if delta > 0 else ("↓" if delta < 0 else "=")
+        sym = "+" if delta > 0 else ("-" if delta < 0 else "=")
         print(f"  上次: {prev_judge_avg:.1f}/10  {sym} {delta:+.1f}")
     print("=" * 82)
 
     # ── Retrieval Metrics ──
     print()
     print("=" * 82)
-    print("  AIOps Eval — RAG 检索评测 (Recall@5 / Precision@5 / MRR)")
+    print("  AIOps Eval - RAG 检索评测 (Recall@5 / Precision@5 / MRR)")
     print("=" * 82)
     print(f"  {'场景':<28} {'R@5':>5}  {'P@5':>5}  {'MRR':>5}  备注")
-    print(f"  {'─'*28}  {'───':>5}  {'───':>5}  {'───':>5}  {'─'*20}")
+    print(f"  {'-'*28}  {'---':>5}  {'---':>5}  {'---':>5}  {'-'*20}")
     recall_sum = precision_sum = mrr_sum = 0.0
     retrieval_count = 0
     for sc, _, _, ret in results:
         if ret is None or ret.get("skipped", True):
             r = ret.get("message", "skipped") if ret else "skipped"
-            print(f"  {sc['name']:<26}  {'—':>5}  {'—':>5}  {'—':>5}  {r}")
+            print(f"  {sc['name']:<26}  {'N/A':>5}  {'N/A':>5}  {'N/A':>5}  {r}")
             continue
         rk = ret["recall_at_k"]
         pk = ret["precision_at_k"]
@@ -150,13 +150,13 @@ def print_report(
         "precision_at_k": precision_sum / max(retrieval_count, 1),
         "mrr": mrr_sum / max(retrieval_count, 1),
     }
-    print(f"  {'─'*82}")
+    print(f"  {'-'*82}")
     print(f"  Recall@5 平均:  {retrieval_avg['recall_at_k']:.0%}    "
           f"Precision@5 平均: {retrieval_avg['precision_at_k']:.0%}    "
           f"MRR 平均: {retrieval_avg['mrr']:.0%}")
     if prev_retrieval_avg:
         rd = retrieval_avg["recall_at_k"] - prev_retrieval_avg.get("recall_at_k", 0)
-        print(f"  Recall 对比: {prev_retrieval_avg['recall_at_k']:.0%} → "
+        print(f"  Recall 对比: {prev_retrieval_avg['recall_at_k']:.0%} -> "
               f"{retrieval_avg['recall_at_k']:.0%}  ({'+'if rd>=0 else ''}{rd:+.0%})")
     print("=" * 82)
 
@@ -194,7 +194,8 @@ def _load_last_score() -> tuple[float | None, dict | None]:
 def main() -> None:
     files = sorted(glob.glob(os.path.join(SCENARIOS_DIR, "scenario_*.json")))
 
-    if len(sys.argv) >= 3 and sys.argv[1] == "--scenario":
+    single_scenario = len(sys.argv) >= 3 and sys.argv[1] == "--scenario"
+    if single_scenario:
         sid = sys.argv[2]
         files = [f for f in files if f"scenario_{sid}" in f]
         if not files:
@@ -219,7 +220,8 @@ def main() -> None:
         prev_retrieval_avg=prev_retrieval_avg,
     )
 
-    _save_score(judge_avg, retrieval_avg)
+    if not single_scenario:
+        _save_score(judge_avg, retrieval_avg)
 
 
 if __name__ == "__main__":

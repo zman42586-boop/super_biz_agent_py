@@ -105,6 +105,9 @@ response_prompt = ChatPromptTemplate.from_messages(
                 - 基于实际数据，不要编造
                 - 如果某些步骤失败，要诚实说明
                 - 使用 Markdown 格式
+                - 将结论严格分成“已观测事实”“知识库证据”“分析推断”
+                - 每个根因结论必须引用事实和证据；证据不足时写“原因未确定”，不要强行归因
+                - 建议单独列出，不能把建议描述成已经执行或已经验证
             """).strip(),
         ),
         ("placeholder", "{messages}"),
@@ -134,7 +137,12 @@ async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
     MAX_STEPS = 8
     if len(past_steps) >= MAX_STEPS:
         logger.warning(f"已执行 {len(past_steps)} 个步骤，超过最大限制 {MAX_STEPS}，强制生成最终响应")
-        llm = llm_factory.create_chat_model(temperature=0)
+        llm = llm_factory.create_chat_model(
+            temperature=0,
+            streaming=False,
+            extra_body={"thinking": {"type": "disabled"}},
+            max_tokens=2048,
+        )
         result = await _generate_response(state, llm)
         _, summary_text = _collapse_past_steps(past_steps)
         result["steps_summary"] = summary_text
@@ -163,7 +171,12 @@ async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
         tools_description = "无法获取工具列表"
 
     # 创建 LLM
-    llm = llm_factory.create_chat_model(temperature=0)
+    llm = llm_factory.create_chat_model(
+        temperature=0,
+        streaming=False,
+        extra_body={"thinking": {"type": "disabled"}},
+        max_tokens=2048,
+    )
 
     # Level 3 Collapse：步骤超过阈值时折叠旧步骤，减少上下文占用
     steps_summary_for_state, steps_summary = _collapse_past_steps(past_steps)

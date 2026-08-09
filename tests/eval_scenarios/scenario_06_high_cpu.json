@@ -27,6 +27,7 @@
   "max_score": 10,
   "relevant_docs": [
     "cpu_high_usage",
-    "matlab_profiler_guide"
+    "matlab_profiler_guide",
+    "matlab_official_cpu_performance_runbook"
   ]
 }

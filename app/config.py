@@ -27,7 +27,8 @@ class Settings(BaseSettings):
     # LLM 配置（当前使用 DeepSeek，OpenAI 兼容模式）
     dashscope_api_key: str = ""
     dashscope_api_base: str = "https://api.deepseek.com/v1"
-    dashscope_model: str = "deepseek-chat"
+    dashscope_model: str = "deepseek-v4-flash"
+    eval_judge_model: str = "deepseek-v4-pro"
     dashscope_embedding_model: str = "BAAI/bge-small-zh-v1.5"
 
     # Milvus 配置
@@ -36,12 +37,23 @@ class Settings(BaseSettings):
     milvus_timeout: int = 10000  # 毫秒
 
     # RAG 配置
-    rag_top_k: int = 3
-    rag_model: str = "deepseek-chat"
+    rag_top_k: int = 5
+    rag_model: str = "deepseek-v4-flash"
+    rag_dense_candidates: int = 20
+    rag_sparse_candidates: int = 20
+    rag_rerank_candidates: int = 20
+    rag_rrf_k: int = 60
+    rag_reranker_model: str = "BAAI/bge-reranker-base"
+    rag_reranker_enabled: bool = True
+    rag_reranker_weight: float = 0.20
+    rag_confidence_low: float = 0.35
+    rag_confidence_high: float = 0.55
+    rag_semantic_evidence_threshold: float = 0.55
+    rag_retry_on_low_confidence: bool = True
 
     # 文档分块配置
-    chunk_max_size: int = 800
-    chunk_overlap: int = 100
+    chunk_max_tokens: int = 420
+    chunk_overlap_tokens: int = 64
 
     # MCP 服务配置 — 本机监控数据采集（CPU / 内存 / LHM 温度）
     mcp_monitor_transport: str = "streamable-http"

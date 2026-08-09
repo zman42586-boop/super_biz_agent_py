@@ -57,7 +57,7 @@ except ImportError:
 LHM_BASE_URL = os.getenv("LHM_BASE_URL", "http://127.0.0.1:8085")
 FASTAPI_BASE_URL = os.getenv("FASTAPI_BASE_URL", "http://127.0.0.1:9900")
 ALERT_WEBHOOK_TOKEN = os.getenv("ALERT_WEBHOOK_TOKEN", "")
-ONCALL_TEMP_ENABLED = os.getenv("ONCALL_TEMP_ENABLED", "true").lower() in ("true", "1", "yes")
+ONCALL_TEMP_ENABLED = os.getenv("ONCALL_TEMP_ENABLED", "false").lower() in ("true", "1", "yes")
 ONCALL_TEMP_THRESHOLD_C = float(os.getenv("ONCALL_TEMP_THRESHOLD_C", "85"))
 ONCALL_TEMP_DURATION_SEC = int(os.getenv("ONCALL_TEMP_DURATION_SEC", "60"))
 ONCALL_TEMP_COOLDOWN_SEC = int(os.getenv("ONCALL_TEMP_COOLDOWN_SEC", "120"))

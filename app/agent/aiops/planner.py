@@ -43,6 +43,12 @@ planner_prompt = ChatPromptTemplate.from_messages(
 
                 注意：你的职责是制定计划，实际的工具调用由 Executor 负责执行。
 
+                证据规则：
+                - 严格区分“已观测事实”“知识库证据”“分析推断”
+                - 知识库中的可能原因不等于本次事故的已证实根因
+                - 检索失败或证据不足时，计划中必须保留补充日志/dump/指标的步骤，并标记“原因未确定”
+                - 不得为了完成计划而编造根因
+
                 {memory_context}
 
                 {experience_context}
@@ -153,7 +159,12 @@ async def planner(state: PlanExecuteState) -> Dict[str, Any]:
             experience_context = ""
 
         # 步骤4: 创建 LLM 并生成计划
-        llm = llm_factory.create_chat_model(temperature=0)
+        llm = llm_factory.create_chat_model(
+            temperature=0,
+            streaming=False,
+            extra_body={"thinking": {"type": "disabled"}},
+            max_tokens=1024,
+        )
 
         planner_chain = planner_prompt | llm.with_structured_output(Plan, method="function_calling")
 

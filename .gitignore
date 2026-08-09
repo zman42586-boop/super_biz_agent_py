@@ -79,3 +79,10 @@ dmypy.json
 # Ruff
 .ruff_cache/
 
+# Local embedding model cache
+.hf-cache/
+tests/.last_eval_score
+
+# Local evaluation reports and scratch scripts
+work/
+
