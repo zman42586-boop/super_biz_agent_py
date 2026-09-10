@@ -3,16 +3,17 @@
 主应用程序，配置路由、中间件、静态文件等
 """
 
+import os
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from contextlib import asynccontextmanager
-import os
-
-from app.config import config
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
-from app.api import chat, health, file, aiops, alerts
+
+from app.api import aiops, alerts, chat, file, health, runs
+from app.config import config
 from app.core.milvus_client import milvus_manager
 
 
@@ -64,6 +65,7 @@ app.include_router(chat.router, prefix="/api", tags=["对话"])
 app.include_router(file.router, prefix="/api", tags=["文件管理"])
 app.include_router(aiops.router, prefix="/api", tags=["AIOps智能运维"])
 app.include_router(alerts.router, prefix="/api", tags=["OnCall告警"])
+app.include_router(runs.router, prefix="/api", tags=["Agent Harness"])
 
 # 挂载静态文件
 static_dir = "static"
@@ -84,7 +86,7 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     uvicorn.run(
         "app.main:app",
         host=config.host,

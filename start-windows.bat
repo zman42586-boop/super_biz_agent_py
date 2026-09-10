@@ -20,12 +20,16 @@ echo [OK] Virtual environment ready
 echo.
 
 REM Start Docker Compose
-echo [1/5] Starting Milvus (Docker)...
+echo [1/6] Starting MySQL and Milvus (Docker)...
+set SERVICES_READY=1
 docker ps --format "{{.Names}}" 2>nul | findstr "milvus-standalone" >nul 2>&1
-if not errorlevel 1 (
-    echo [OK] Milvus already running
+if errorlevel 1 set SERVICES_READY=0
+docker ps --format "{{.Names}}" 2>nul | findstr "superbiz-mysql" >nul 2>&1
+if errorlevel 1 set SERVICES_READY=0
+if "!SERVICES_READY!"=="1" (
+    echo [OK] MySQL and Milvus already running
 ) else (
-    echo [INFO] Starting Milvus containers...
+    echo [INFO] Starting MySQL and Milvus containers...
     docker compose -f vector-database.yml up -d
     if errorlevel 1 (
         echo [ERROR] Docker failed. Make sure Docker Desktop is running.
@@ -39,7 +43,7 @@ echo [OK] Milvus ready
 echo.
 
 REM Start LibreHardwareMonitor
-echo [2/5] Starting LibreHardwareMonitor...
+echo [2/6] Starting LibreHardwareMonitor...
 tasklist /FI "IMAGENAME eq LibreHardwareMonitor.exe" 2>nul | findstr /I "LibreHardwareMonitor.exe" >nul 2>&1
 if not errorlevel 1 (
     echo [OK] LibreHardwareMonitor already running
@@ -57,14 +61,14 @@ if not errorlevel 1 (
 echo.
 
 REM Start Monitor MCP Server
-echo [3/5] Starting Monitor MCP Server (port 8004)...
+echo [3/6] Starting Monitor MCP Server (port 8004)...
 start "Monitor MCP Server" /min %PYTHON_CMD% mcp_servers/monitor_server.py
 timeout /t 2 /nobreak >nul
 echo [OK] Monitor MCP Server started
 echo.
 
 REM Start FastAPI
-echo [4/5] Starting FastAPI (port 9900)...
+echo [4/6] Starting FastAPI (port 9900)...
 start "SuperBizAgent API" %PYTHON_CMD% -m uvicorn app.main:app --host 0.0.0.0 --port 9900
 echo [INFO] Waiting 20s for service to start...
 timeout /t 20 /nobreak >nul
@@ -86,9 +90,16 @@ if errorlevel 1 (
     echo [OK] Docs uploaded
 )
 
+REM Start durable Harness worker after FastAPI and MySQL are ready
+echo.
+echo [5/6] Starting Agent Harness Worker...
+start "Agent Harness Worker" /min %PYTHON_CMD% scripts/harness_worker.py
+timeout /t 2 /nobreak >nul
+echo [OK] Agent Harness Worker started
+
 REM Start LHM Alert Agent after FastAPI is ready
 echo.
-echo [5/5] Starting LHM Alert Agent (active OnCall detector)...
+echo [6/6] Starting LHM Alert Agent (active OnCall detector)...
 start "LHM Alert Agent" /min %PYTHON_CMD% scripts/lhm_alert_agent.py
 timeout /t 2 /nobreak >nul
 echo [OK] LHM Alert Agent started
@@ -102,6 +113,7 @@ echo  Web UI:    http://localhost:9900
 echo  API Docs:  http://localhost:9900/docs
 echo  Milvus UI: http://localhost:8000
 echo  Monitor MCP: http://localhost:8004/mcp
+echo  Harness API: http://localhost:9900/api/runs
 echo  LibreHardwareMonitor: http://127.0.0.1:8085
 echo  LHM Agent: active temperature detector
 echo.

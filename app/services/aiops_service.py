@@ -3,14 +3,21 @@
 基于 LangGraph 官方教程实现
 """
 
-from typing import AsyncGenerator, Dict, Any
-from langgraph.graph import StateGraph, END
+import asyncio
+from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING, Any
+
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
 from loguru import logger
 
-from app.agent.aiops import PlanExecuteState, planner, executor, replanner, microcompact
-from app.utils.token_meter import count_steps_tokens, log_compression
+from app.agent.aiops import PlanExecuteState, executor, microcompact, planner, replanner
+from app.harness.runtime import get_run_context
 from app.memory import memory_writer
+from app.utils.token_meter import count_steps_tokens, log_compression
+
+if TYPE_CHECKING:
+    from app.models.alert import AlertRecord
 
 # 节点名称常量
 NODE_PLANNER = "planner"
@@ -44,8 +51,26 @@ class AIOpsService:
         workflow.add_node(NODE_MICROCOMPACT, microcompact)  # Level 2: 压缩大工具结果
         workflow.add_node(NODE_REPLANNER, replanner)      # 重新规划
 
-        # 设置入口点
-        workflow.set_entry_point(NODE_PLANNER)
+        # 新任务从 Planner 开始；持久化任务恢复时从尚未完成的节点继续。
+        def choose_entry(state: PlanExecuteState) -> str:
+            if state.get("response"):
+                return END
+            if state.get("plan"):
+                return NODE_EXECUTOR
+            if state.get("past_steps"):
+                return NODE_REPLANNER
+            return NODE_PLANNER
+
+        workflow.add_conditional_edges(
+            START,
+            choose_entry,
+            {
+                NODE_PLANNER: NODE_PLANNER,
+                NODE_EXECUTOR: NODE_EXECUTOR,
+                NODE_REPLANNER: NODE_REPLANNER,
+                END: END,
+            },
+        )
 
         # 定义边：planner → executor → microcompact → replanner
         workflow.add_edge(NODE_PLANNER, NODE_EXECUTOR)
@@ -88,8 +113,10 @@ class AIOpsService:
     async def execute(
         self,
         user_input: str,
-        session_id: str = "default"
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+        session_id: str = "default",
+        initial_state: PlanExecuteState | None = None,
+        execution_id: str | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """
         执行 Plan-Execute-Replan 流程
 
@@ -103,30 +130,41 @@ class AIOpsService:
         logger.info(f"[会话 {session_id}] 开始执行任务: {user_input}")
 
         try:
-            # 初始化状态
-            initial_state: PlanExecuteState = {
+            # 初始化状态；Harness 恢复时传入最后一次持久化快照。
+            graph_input: PlanExecuteState = initial_state or {
                 "input": user_input,
                 "plan": [],
                 "past_steps": [],
                 "response": "",
                 "steps_summary": "",
             }
+            graph_input["input"] = graph_input.get("input") or user_input
 
             # 流式执行工作流
             config_dict = {
                 "configurable": {
-                    "thread_id": session_id
+                    "thread_id": execution_id or session_id
                 }
             }
 
             async for event in self.graph.astream(
-                input=initial_state,
+                input=graph_input,
                 config=config_dict,
                 stream_mode="updates"
             ):
                 # 解析事件
                 for node_name, node_output in event.items():
                     logger.info(f"节点 '{node_name}' 输出事件")
+
+                    # Run/Step 持久化独立于 LangGraph 的进程内 MemorySaver。
+                    run_context = get_run_context()
+                    if run_context is not None and node_output:
+                        await asyncio.to_thread(
+                            run_context.repository.merge_checkpoint,
+                            run_context.run_id,
+                            node_name,
+                            node_output,
+                        )
 
                     # 根据节点类型生成不同的事件
                     if node_name == NODE_PLANNER:
@@ -198,7 +236,7 @@ class AIOpsService:
     async def diagnose(
         self,
         session_id: str = "default"
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """
         AIOps 诊断接口（兼容旧接口）
 
@@ -300,13 +338,13 @@ class AIOpsService:
             else:
                 yield event
 
-    async def execute_alert_diagnosis(self, alert: "AlertRecord") -> str:  # type: ignore[name-defined]
+    async def execute_alert_diagnosis(self, alert: "AlertRecord") -> str:
         """
         根据真实告警 payload 构造明确 prompt，运行 Plan-Execute-Replan 诊断，
         返回最终报告文本。支持温度告警和进程崩溃告警两类场景。
         """
         from textwrap import dedent
-        from app.models.alert import AlertRecord as _AlertRecord
+
 
         recent_pts = ""
         if alert.evidence and alert.evidence.recent_points:
@@ -364,7 +402,7 @@ class AIOpsService:
 
         return report or "诊断未返回报告内容"
 
-    def _format_planner_event(self, state: Dict | None) -> Dict:
+    def _format_planner_event(self, state: dict | None) -> dict:
         """格式化 Planner 节点事件"""
         if not state:
             return {
@@ -382,7 +420,7 @@ class AIOpsService:
             "plan": plan
         }
 
-    def _format_executor_event(self, state: Dict | None) -> Dict:
+    def _format_executor_event(self, state: dict | None) -> dict:
         """格式化 Executor 节点事件"""
         if not state:
             return {
@@ -410,7 +448,7 @@ class AIOpsService:
                 "message": "开始执行步骤"
             }
 
-    def _format_replanner_event(self, state: Dict | None) -> Dict:
+    def _format_replanner_event(self, state: dict | None) -> dict:
         """格式化 Replanner 节点事件"""
         if not state:
             return {
