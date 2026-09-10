@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import List
-
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -47,25 +45,32 @@ async def ingest_alert(req: AlertIngestRequest) -> AlertIngestResponse:
     """
     record, is_new = await alert_service.ingest(req)
     diagnosis_triggered = False
+    diagnosis_run_id = record.diagnosis_run_id
 
-    if is_new and req.severity == "critical" and config.oncall_auto_diagnosis:
-        await alert_service.trigger_diagnosis(record)
-        diagnosis_triggered = True
+    should_queue_diagnosis = (
+        req.severity == "critical"
+        and config.oncall_auto_diagnosis
+        and record.diagnosis_run_id is None
+    )
+    if should_queue_diagnosis:
+        diagnosis_run_id = await alert_service.trigger_diagnosis(record)
+        diagnosis_triggered = diagnosis_run_id is not None
 
     return AlertIngestResponse(
         alert_id=record.alert_id,
         status="new" if is_new else "duplicate",
         message="告警已接收并处理" if is_new else "告警已存在，忽略重复上报",
         diagnosis_triggered=diagnosis_triggered,
+        diagnosis_run_id=diagnosis_run_id,
     )
 
 
 @router.get(
     "/alerts/active",
-    response_model=List[AlertRecord],
+    response_model=list[AlertRecord],
     summary="查询当前活跃告警列表",
 )
-async def list_active_alerts() -> List[AlertRecord]:
+async def list_active_alerts() -> list[AlertRecord]:
     """返回内存中所有 status=active 的告警。"""
     return alert_service.get_active_alerts()
 

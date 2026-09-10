@@ -69,6 +69,18 @@ POST /api/runs/{run_id}/cancel
 POST /api/runs/{run_id}/resume
 ```
 
+## Automatic alert diagnosis
+
+`POST /api/alerts/ingest` keeps the existing alert deduplication behavior. When a new or
+previously unqueued critical alert arrives and `ONCALL_AUTO_DIAGNOSIS=true`, the API creates
+an `alert_diagnosis` Run instead of starting an in-process `asyncio` diagnosis task. The
+response contains `diagnosis_run_id`, which can be inspected through the Run APIs above.
+
+The complete `AlertRecord`, including evidence, is stored in the Run input. A Harness Worker
+reconstructs that alert, resumes the LangGraph state from `state_json`, and sends the diagnosis
+email before marking the Run successful. If execution or email delivery fails, the Run is
+marked failed and can be resumed explicitly.
+
 ## Recovery demonstration
 
 1. Create a Run and start the worker.

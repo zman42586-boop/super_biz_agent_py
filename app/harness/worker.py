@@ -88,6 +88,7 @@ class HarnessWorker:
                             or (event.get("diagnosis") or {}).get("report")
                             or ""
                         )
+                        await self._deliver_alert_report(run, report)
                         await asyncio.to_thread(self.repository.finish_run, run_id, report)
                         logger.info(f"[Harness] run succeeded: {run_id}")
                         return True
@@ -132,6 +133,27 @@ class HarnessWorker:
         task = str((run.get("input") or {}).get("task", ""))
         state = run.get("state") or None
         execution_id = f"{run['id']}:{run.get('version', 0)}"
+
+        if run.get("kind") == "alert_diagnosis":
+            from app.models.alert import AlertRecord
+
+            alert_payload = (run.get("input") or {}).get("alert")
+            if not alert_payload:
+                raise ValueError("alert_diagnosis Run is missing input.alert")
+            alert = AlertRecord.model_validate(alert_payload)
+            report = await aiops_service.execute_alert_diagnosis(
+                alert,
+                initial_state=state,
+                execution_id=execution_id,
+            )
+            yield {
+                "type": "complete",
+                "stage": "diagnosis_complete",
+                "response": report,
+                "alert_id": alert.alert_id,
+            }
+            return
+
         async for event in aiops_service.execute(
             task,
             session_id=str(run.get("session_id") or run["id"]),
@@ -139,6 +161,27 @@ class HarnessWorker:
             execution_id=execution_id,
         ):
             yield event
+
+    async def _deliver_alert_report(self, run: dict[str, Any], report: str) -> None:
+        """Send the diagnosis email before marking an alert Run successful."""
+        if run.get("kind") != "alert_diagnosis":
+            return
+
+        from app.models.alert import AlertRecord
+        from app.services.alert_service import send_diagnosis_report_email
+
+        alert_payload = (run.get("input") or {}).get("alert")
+        if not alert_payload:
+            raise ValueError("alert_diagnosis Run is missing input.alert")
+        alert = AlertRecord.model_validate(alert_payload)
+        alert.diagnosis_report = report
+        await send_diagnosis_report_email(alert, report)
+        await asyncio.to_thread(
+            self.repository.append_event,
+            str(run["id"]),
+            "alert_diagnosis_email_sent",
+            {"alert_id": alert.alert_id},
+        )
 
 
 async def run_worker() -> None:

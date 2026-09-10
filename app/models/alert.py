@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
 class AlertEvidence(BaseModel):
     """告警证据（传感器最近数据点、崩溃日志等）"""
-    lhm_url: Optional[str] = None
-    recent_points: List[List[Any]] = Field(default_factory=list)
-    crash_log: Optional[str] = Field(default=None, description="进程崩溃日志摘要")
-    crash_type: Optional[str] = Field(default=None, description="崩溃类型: stack_overflow / access_violation 等")
-    monitored_process: Optional[str] = Field(default=None, description="被监控的进程名")
-    system_snapshot: Optional[dict] = Field(default=None, description="崩溃时系统快照 {cpu, memory, top_processes}")
-    extra: Dict[str, Any] = Field(default_factory=dict)
+    lhm_url: str | None = None
+    recent_points: list[list[Any]] = Field(default_factory=list)
+    crash_log: str | None = Field(default=None, description="进程崩溃日志摘要")
+    crash_type: str | None = Field(default=None, description="崩溃类型: stack_overflow / access_violation 等")
+    monitored_process: str | None = Field(default=None, description="被监控的进程名")
+    system_snapshot: dict | None = Field(default=None, description="崩溃时系统快照 {cpu, memory, top_processes}")
+    extra: dict[str, Any] = Field(default_factory=dict)
 
 
 class AlertIngestRequest(BaseModel):
@@ -49,7 +50,8 @@ class AlertRecord(BaseModel):
     evidence: AlertEvidence
     received_at: datetime = Field(default_factory=datetime.now)
     status: str = "active"      # active / resolved
-    diagnosis_report: Optional[str] = None
+    diagnosis_report: str | None = None
+    diagnosis_run_id: str | None = None
 
 
 class AlertIngestResponse(BaseModel):
@@ -58,3 +60,4 @@ class AlertIngestResponse(BaseModel):
     status: str
     message: str
     diagnosis_triggered: bool = False
+    diagnosis_run_id: str | None = None

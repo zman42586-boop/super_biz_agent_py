@@ -338,62 +338,29 @@ class AIOpsService:
             else:
                 yield event
 
-    async def execute_alert_diagnosis(self, alert: "AlertRecord") -> str:
+    async def execute_alert_diagnosis(
+        self,
+        alert: "AlertRecord",
+        *,
+        initial_state: PlanExecuteState | None = None,
+        execution_id: str | None = None,
+    ) -> str:
         """
         根据真实告警 payload 构造明确 prompt，运行 Plan-Execute-Replan 诊断，
         返回最终报告文本。支持温度告警和进程崩溃告警两类场景。
         """
-        from textwrap import dedent
+        from app.services.alert_service import build_alert_diagnosis_task
 
-
-        recent_pts = ""
-        if alert.evidence and alert.evidence.recent_points:
-            pts = alert.evidence.recent_points[-10:]
-            recent_pts = "\n".join(f"  {p[0]}  {p[1]}" for p in pts)
-            recent_pts = f"\n最近数据点（时间, 值）:\n{recent_pts}"
-
-        # 进程崩溃告警：附带崩溃日志供 AI 分析
-        crash_section = ""
-        if alert.evidence:
-            crash_type = getattr(alert.evidence, "crash_type", None)
-            crash_log = getattr(alert.evidence, "crash_log", None)
-            monitored_proc = getattr(alert.evidence, "monitored_process", None)
-            snapshot = getattr(alert.evidence, "system_snapshot", None)
-
-            if crash_type or crash_log:
-                crash_section = "\n\n## 进程崩溃详情\n\n"
-                if monitored_proc:
-                    crash_section += f"- 崩溃进程: {monitored_proc}\n"
-                if crash_type:
-                    crash_section += f"- 崩溃类型: {crash_type}\n"
-                if crash_log:
-                    # 限制长度避免撑爆上下文
-                    crash_section += f"\n崩溃日志摘要:\n```\n{crash_log[:3000]}\n```\n"
-                if snapshot and isinstance(snapshot, dict):
-                    cpu = snapshot.get("cpu_percent", "N/A")
-                    mem = snapshot.get("memory_percent", "N/A")
-                    crash_section += f"\n崩溃时系统状态: CPU {cpu}%, 内存 {mem}%\n"
-
-        task = dedent(f"""
-            当前主机 [{alert.host}] 发生了一条 [{alert.severity.upper()}] 级别告警：
-
-            告警名称: {alert.alert_name}
-            指标:     {alert.metric}
-            当前值:   {alert.value}
-            阈值:     {alert.threshold}
-            持续时间: {alert.duration_sec} 秒
-            告警时间: {alert.ts}
-            传感器ID: {alert.sensor_id or '未知'}{recent_pts}{crash_section}
-
-            请基于以上真实告警数据，结合知识库经验和可用监控工具，
-            分析告警根因并生成完整的诊断报告。报告格式要求同标准 AIOps 报告模板。
-            报告必须分别列出：已观测事实、知识库证据、分析推断、处理建议。
-            只有事实与证据能共同支持时才能给出确定根因；否则写“原因未确定”并列出待补充证据。
-        """).strip()
+        task = build_alert_diagnosis_task(alert)
 
         session_id = f"alert_{alert.alert_id}"
         report = ""
-        async for event in self.execute(task, session_id):
+        async for event in self.execute(
+            task,
+            session_id,
+            initial_state=initial_state,
+            execution_id=execution_id,
+        ):
             if event.get("type") == "complete":
                 report = event.get("response", "")
                 break
