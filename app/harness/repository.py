@@ -72,6 +72,7 @@ class HarnessRepository:
             "past_steps": [],
             "response": "",
             "steps_summary": "",
+            "loop_guard": {},
         }
         input_json = {"task": task, **(payload or {})}
         now = utc_now()

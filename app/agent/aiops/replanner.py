@@ -4,16 +4,19 @@ Replanner 节点：重新规划或生成最终响应
 """
 
 from textwrap import dedent
-from typing import Dict, Any, List
+from typing import Any
+
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from app.core.llm_factory import llm_factory
-from pydantic import BaseModel, Field
 from loguru import logger
+from pydantic import BaseModel, Field
 
-from app.tools import get_current_time, retrieve_knowledge
 from app.agent.mcp_client import get_mcp_client_with_retry
+from app.core.llm_factory import llm_factory
+from app.harness.config import harness_settings
+from app.tools import get_current_time, retrieve_knowledge
 from app.utils.token_meter import count_steps_tokens, log_compression
+
 from .state import PlanExecuteState
 from .utils import format_tools_description
 
@@ -35,7 +38,7 @@ class Act(BaseModel):
         - 'respond': 计划已完成且信息充足，生成最终响应"""
     )
     # action 为 'replan' 时，新的步骤列表（会替换当前剩余计划）
-    new_steps: List[str] = Field(
+    new_steps: list[str] = Field(
         default_factory=list,
         description="新的步骤列表（如果 action 是 'replan'，这些步骤会替换剩余计划）"
     )
@@ -83,7 +86,7 @@ replanner_prompt = ChatPromptTemplate.from_messages(
                 - 剩余步骤是否真的"必需"？
                 - 已执行步骤数是否过多（>= 5）？如果是，立即 respond
 
-                **决策优先级口诀：** 
+                **决策优先级口诀：**
                 "优先结束 > 保持不变 > 调整计划"
                 "信息足够就响应，不要追求完美"
             """).strip(),
@@ -115,7 +118,7 @@ response_prompt = ChatPromptTemplate.from_messages(
 )
 
 
-async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
+async def replanner(state: PlanExecuteState) -> dict[str, Any]:
     """
     重新规划节点：决定是继续、调整计划还是生成最终响应
 
@@ -134,9 +137,12 @@ async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
     logger.info(f"已执行步骤: {len(past_steps)}")
 
     # ⚠️ 强制限制：如果已执行步骤过多，直接生成响应
-    MAX_STEPS = 8
-    if len(past_steps) >= MAX_STEPS:
-        logger.warning(f"已执行 {len(past_steps)} 个步骤，超过最大限制 {MAX_STEPS}，强制生成最终响应")
+    max_steps = harness_settings.max_steps
+    if len(past_steps) >= max_steps:
+        logger.warning(
+            f"已执行 {len(past_steps)} 个步骤，超过最大限制 {max_steps}，"
+            "强制生成最终响应"
+        )
         llm = llm_factory.create_chat_model(
             temperature=0,
             streaming=False,
@@ -256,7 +262,7 @@ async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
         return result
 
 
-async def _generate_response(state: PlanExecuteState, llm: ChatOpenAI) -> Dict[str, Any]:
+async def _generate_response(state: PlanExecuteState, llm: ChatOpenAI) -> dict[str, Any]:
     """生成最终响应"""
     logger.info("生成最终响应...")
 

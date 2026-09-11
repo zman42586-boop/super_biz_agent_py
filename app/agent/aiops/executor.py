@@ -13,6 +13,7 @@ from loguru import logger
 from app.agent.mcp_client import get_mcp_client_with_retry
 from app.claude_skills import list_skill_ids
 from app.core.llm_factory import llm_factory
+from app.harness.loop_guard import loop_guard
 from app.harness.runtime import get_run_context
 from app.harness.tool_gateway import ToolExecutionError, tool_gateway
 from app.tools import get_current_time, retrieve_knowledge, search_log
@@ -39,15 +40,39 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
     task = plan[0]
     logger.info(f"当前任务: {task}")
 
+    current_past_steps = list(state.get("past_steps", []))
+    run_context = get_run_context()
+    guard_decision = loop_guard.evaluate_step(task, current_past_steps)
+    if not guard_decision.allowed:
+        payload = guard_decision.event_payload("step")
+        logger.warning(f"[LoopGuard] {payload}")
+        if run_context is not None:
+            await asyncio.to_thread(
+                run_context.repository.append_event,
+                run_context.run_id,
+                "loop_guard_triggered",
+                payload,
+            )
+        previous_guard = dict(state.get("loop_guard") or {})
+        guard_state = {
+            **payload,
+            "trigger_count": int(previous_guard.get("trigger_count", 0)) + 1,
+        }
+        return {
+            "plan": [],
+            "past_steps": current_past_steps
+            + [(task, f"LoopGuard 已停止该步骤：{guard_decision.message}")],
+            "loop_guard": guard_state,
+        }
+
     # Skill 识别：若步骤包含 .claude/skills 中声明的 id，记录日志
     for skill_id in list_skill_ids():
         if skill_id in task:
             logger.info(f"检测到 Skill 步骤: {skill_id}，将按 Skill 文档推荐流程执行")
             break
 
-    run_context = get_run_context()
     step_row = None
-    step_index = len(state.get("past_steps", []))
+    step_index = len(current_past_steps)
     if run_context is not None:
         step_row = await asyncio.to_thread(
             run_context.repository.start_step,
@@ -59,7 +84,6 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
         if step_row["status"] == "succeeded":
             stored = step_row.get("output") or {}
             stored_result = str(stored.get("content", ""))
-            current_past_steps = list(state.get("past_steps", []))
             return {
                 "plan": plan[1:],
                 "past_steps": current_past_steps + [(task, stored_result)],
@@ -174,7 +198,6 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
             )
 
         # past_steps 使用全量替换 reducer，必须返回完整列表
-        current_past_steps = list(state.get("past_steps", []))
         return {
             "plan": plan[1:],
             "past_steps": current_past_steps + [(task, result)],
@@ -189,7 +212,6 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
                 "STEP_EXECUTION_FAILED",
                 str(e),
             )
-        current_past_steps = list(state.get("past_steps", []))
         return {
             "plan": plan[1:],
             "past_steps": current_past_steps + [(task, f"执行失败: {str(e)}")],

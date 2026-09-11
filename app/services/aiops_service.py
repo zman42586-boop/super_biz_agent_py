@@ -8,10 +8,12 @@ from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from loguru import logger
 
 from app.agent.aiops import PlanExecuteState, executor, microcompact, planner, replanner
+from app.harness.config import harness_settings
 from app.harness.runtime import get_run_context
 from app.memory import memory_writer
 from app.utils.token_meter import count_steps_tokens, log_compression
@@ -137,6 +139,7 @@ class AIOpsService:
                 "past_steps": [],
                 "response": "",
                 "steps_summary": "",
+                "loop_guard": {},
             }
             graph_input["input"] = graph_input.get("input") or user_input
 
@@ -144,7 +147,8 @@ class AIOpsService:
             config_dict = {
                 "configurable": {
                     "thread_id": execution_id or session_id
-                }
+                },
+                "recursion_limit": max(1, harness_settings.graph_recursion_limit),
             }
 
             async for event in self.graph.astream(
@@ -230,7 +234,12 @@ class AIOpsService:
             yield {
                 "type": "error",
                 "stage": "error",
-                "message": f"任务执行出错: {str(e)}"
+                "error_code": (
+                    "GRAPH_RECURSION_LIMIT"
+                    if isinstance(e, GraphRecursionError)
+                    else "AGENT_EXECUTION_FAILED"
+                ),
+                "message": f"任务执行出错: {str(e)}",
             }
 
     async def diagnose(

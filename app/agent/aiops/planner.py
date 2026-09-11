@@ -4,23 +4,26 @@ Planner 节点：制定执行计划
 """
 
 from textwrap import dedent
-from typing import Dict, Any, List
-from langchain_core.prompts import ChatPromptTemplate
-from app.core.llm_factory import llm_factory
-from pydantic import BaseModel, Field
-from loguru import logger
+from typing import Any
 
-from app.tools import get_current_time, retrieve_knowledge, search_log
+from langchain_core.prompts import ChatPromptTemplate
+from loguru import logger
+from pydantic import BaseModel, Field
+
 from app.agent.mcp_client import get_mcp_client_with_retry
-from app.memory import load_memory_context
 from app.claude_skills import load_skills_description
+from app.core.llm_factory import llm_factory
+from app.harness.config import harness_settings
+from app.memory import load_memory_context
+from app.tools import get_current_time, retrieve_knowledge, search_log
+
 from .state import PlanExecuteState
 from .utils import format_tools_description
 
 
 class Plan(BaseModel):
     """计划的输出格式"""
-    steps: List[str] = Field(
+    steps: list[str] = Field(
         description="完成任务所需的不同步骤。这些步骤应该按顺序执行，每一步都建立在前一步的基础上。"
     )
 
@@ -73,7 +76,7 @@ planner_prompt = ChatPromptTemplate.from_messages(
 )
 
 
-async def planner(state: PlanExecuteState) -> Dict[str, Any]:
+async def planner(state: PlanExecuteState) -> dict[str, Any]:
     """
     规划节点：根据用户输入生成执行计划
 
@@ -183,6 +186,13 @@ async def planner(state: PlanExecuteState) -> Dict[str, Any]:
         else:
             # 如果返回的是字典，提取 steps 字段
             plan_steps = plan_result.get("steps", [])  # type: ignore
+
+        if len(plan_steps) > harness_settings.max_steps:
+            logger.warning(
+                f"Planner 生成 {len(plan_steps)} 个步骤，"
+                f"按 LoopGuard 限制截断为 {harness_settings.max_steps} 个"
+            )
+            plan_steps = plan_steps[: harness_settings.max_steps]
 
         logger.info(f"计划已生成，共 {len(plan_steps)} 个步骤")
         for i, step in enumerate(plan_steps, 1):

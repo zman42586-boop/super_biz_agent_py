@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from app.harness.config import harness_settings
+from app.harness.loop_guard import LoopGuard, loop_guard
 from app.harness.runtime import get_run_context
 
 
@@ -96,8 +97,13 @@ def _classify_error(exc: BaseException) -> ToolExecutionError:
 
 
 class ToolGateway:
-    def __init__(self, policies: dict[str, ToolPolicy] | None = None) -> None:
+    def __init__(
+        self,
+        policies: dict[str, ToolPolicy] | None = None,
+        guard: LoopGuard | None = None,
+    ) -> None:
         self.policies = policies or {}
+        self.loop_guard = guard or loop_guard
 
     async def execute(
         self,
@@ -117,6 +123,23 @@ class ToolGateway:
 
         call_row: dict[str, Any] | None = None
         if context is not None and step_id is not None:
+            existing_calls = await asyncio.to_thread(
+                context.repository.list_tool_calls, context.run_id
+            )
+            guard_decision = self.loop_guard.evaluate_tool_call(
+                tool_name, validated, existing_calls
+            )
+            if not guard_decision.allowed:
+                payload = guard_decision.event_payload("tool_call")
+                await asyncio.to_thread(
+                    context.repository.append_event,
+                    context.run_id,
+                    "loop_guard_triggered",
+                    payload,
+                )
+                code = f"LOOP_GUARD_{str(guard_decision.reason).upper()}"
+                raise ToolExecutionError(code, guard_decision.message, retryable=False)
+
             call_row, cached = await asyncio.to_thread(
                 context.repository.begin_tool_call,
                 run_id=context.run_id,

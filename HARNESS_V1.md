@@ -34,8 +34,15 @@ HARNESS_MYSQL_PASSWORD=replace_me
 HARNESS_AUTO_CREATE_SCHEMA=true
 HARNESS_LEASE_SEC=30
 HARNESS_POLL_INTERVAL_SEC=1
+HARNESS_RUN_TIMEOUT_SEC=300
 HARNESS_TOOL_TIMEOUT_SEC=10
 HARNESS_TOOL_MAX_RETRIES=2
+HARNESS_MAX_STEPS=8
+HARNESS_MAX_TOOL_CALLS=20
+HARNESS_MAX_REPEATED_STEPS=2
+HARNESS_MAX_REPEATED_TOOL_CALLS=2
+HARNESS_MAX_NO_PROGRESS_STEPS=2
+HARNESS_GRAPH_RECURSION_LIMIT=32
 ```
 
 `HARNESS_DATABASE_URL` can override the individual MySQL settings. Tests use an isolated
@@ -80,6 +87,20 @@ The complete `AlertRecord`, including evidence, is stored in the Run input. A Ha
 reconstructs that alert, resumes the LangGraph state from `state_json`, and sends the diagnosis
 email before marking the Run successful. If execution or email delivery fails, the Run is
 marked failed and can be resumed explicitly.
+
+## LoopGuard v1
+
+LoopGuard provides deterministic limits outside the LLM prompt:
+
+- The Worker fails a Run with `RUN_TIMEOUT` when its total execution budget expires.
+- Planner output and Replanner execution are capped by `HARNESS_MAX_STEPS`.
+- Repeated steps and consecutive no-progress results stop execution and force Replanner to
+  produce a report from the evidence already collected.
+- Tool Gateway blocks excess calls and repeated `tool_name + arguments` fingerprints.
+- LangGraph has an explicit recursion limit as the final graph-level circuit breaker.
+
+Every trigger appends a `loop_guard_triggered` event. Step triggers are also stored in the
+Run checkpoint under `state_json.loop_guard`, so recovery keeps the latest guard decision.
 
 ## Recovery demonstration
 
