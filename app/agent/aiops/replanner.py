@@ -15,13 +15,11 @@ from app.agent.mcp_client import get_mcp_client_with_retry
 from app.core.llm_factory import llm_factory
 from app.harness.config import harness_settings
 from app.tools import get_current_time, retrieve_knowledge
-from app.utils.token_meter import count_steps_tokens, log_compression
+from app.utils.context_compaction import collapse_past_steps, format_execution_history
+from app.utils.token_meter import log_token_budget
 
 from .state import PlanExecuteState
 from .utils import format_tools_description
-
-# Level 3 Collapse：超过此步骤数后将旧步骤折叠为摘要（演示模式：1步，只要有步骤历史就触发）
-_COLLAPSE_STEPS_THRESHOLD = 1
 
 
 class Response(BaseModel):
@@ -150,7 +148,7 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
             max_tokens=2048,
         )
         result = await _generate_response(state, llm)
-        _, summary_text = _collapse_past_steps(past_steps)
+        _, summary_text = collapse_past_steps(past_steps)
         result["steps_summary"] = summary_text
         return result
 
@@ -185,7 +183,7 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
     )
 
     # Level 3 Collapse：步骤超过阈值时折叠旧步骤，减少上下文占用
-    steps_summary_for_state, steps_summary = _collapse_past_steps(past_steps)
+    steps_summary_for_state, steps_summary = collapse_past_steps(past_steps)
 
     # 如果还有剩余计划，进行决策
     if plan:
@@ -200,6 +198,16 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
                 ("user", f"剩余计划: {', '.join(plan)}"),
                 ("user", f"⚠️ 重要提示：已执行 {len(past_steps)} 个步骤，请优先考虑是否信息已足够生成响应（respond）")
             ]
+
+            log_token_budget(
+                "ReplannerInput",
+                {
+                    "task": input_text,
+                    "history": steps_summary,
+                    "plan": ", ".join(plan),
+                    "tools": tools_description,
+                },
+            )
 
             act = await replanner_chain.ainvoke({
                 "messages": messages,
@@ -269,11 +277,8 @@ async def _generate_response(state: PlanExecuteState, llm: ChatOpenAI) -> dict[s
     input_text = state.get("input", "")
     past_steps = state.get("past_steps", [])
 
-    # 格式化执行历史
-    execution_history = "\n\n".join([
-        f"### 步骤: {step}\n**结果:**\n{result}"
-        for step, result in past_steps
-    ])
+    # 复用折叠后的历史，避免把 Replanner 已压缩的旧步骤再次完整注入。
+    execution_history = format_execution_history(past_steps)
 
     response_gen = response_prompt | llm.with_structured_output(Response, method="function_calling")
 
@@ -283,6 +288,11 @@ async def _generate_response(state: PlanExecuteState, llm: ChatOpenAI) -> dict[s
             ("user", f"执行历史:\n{execution_history}"),
             ("user", "请基于以上信息生成全面的最终响应")
         ]
+
+        log_token_budget(
+            "ResponseInput",
+            {"task": input_text, "history": execution_history},
+        )
 
         response_obj = await response_gen.ainvoke({"messages": messages})
 
@@ -325,53 +335,3 @@ def _format_simple_steps(past_steps: list) -> str:
         formatted.append(f"{i}. **{step}**\n   {result_preview}\n")
 
     return "\n".join(formatted)
-
-
-def _collapse_past_steps(past_steps: list) -> tuple[str, str]:
-    """Level 3 Collapse：将历史步骤折叠为紧凑摘要。
-
-    超过 _COLLAPSE_STEPS_THRESHOLD 步时，旧步骤只保留单行摘要，
-    最近 2 步保留 500 字符详细内容。
-
-    Returns:
-        (state_summary, prompt_summary)
-        - state_summary: 写入 PlanExecuteState.steps_summary 的内容
-        - prompt_summary: 供 replanner prompt 使用的格式化字符串
-    """
-    if not past_steps:
-        return "", ""
-
-    if len(past_steps) <= _COLLAPSE_STEPS_THRESHOLD:
-        summary = "\n".join([
-            f"步骤: {step}\n结果: {str(result)[:300]}..."
-            for step, result in past_steps
-        ])
-        return summary, summary
-
-    before_tokens = count_steps_tokens(past_steps)
-
-    older = past_steps[:-2]
-    recent = past_steps[-2:]
-
-    older_lines = [
-        f"[折叠] 步骤{i + 1}: {step} → {str(result)[:120]}..."
-        for i, (step, result) in enumerate(older)
-    ]
-    recent_lines = [
-        f"步骤: {step}\n结果: {str(result)[:500]}{'...' if len(str(result)) > 500 else ''}"
-        for step, result in recent
-    ]
-
-    state_summary = "[历史步骤摘要]\n" + "\n".join(older_lines)
-    prompt_summary = (
-        "[历史步骤（已折叠）]\n" + "\n".join(older_lines) +
-        "\n\n[最近步骤详情]\n" + "\n\n".join(recent_lines)
-    )
-
-    after_tokens = count_steps_tokens(
-        [(f"[折叠]步骤{i+1}", line) for i, line in enumerate(older_lines)]
-        + list(recent)
-    )
-    log_compression("Collapse", before_tokens, after_tokens)
-
-    return state_summary, prompt_summary

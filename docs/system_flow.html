@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SuperBizAgent 系统流程图</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:      #f9f9f7;
+    --surface-1: #fcfcfb;
+    --ink-1:     #0b0b0b;
+    --ink-2:     #52514e;
+    --muted:     #898781;
+    --grid:      #e1e0d9;
+    --base:      #c3c2b7;
+    /* categorical slots, fixed order */
+    --s1: #2a78d6; /* 监控采集层 */
+    --s2: #eb6834; /* 接入层 */
+    --s3: #1baf7a; /* Agent 执行层 */
+    --s4: #eda100; /* RAG 知识层 */
+    --s5: #e87ba4; /* 持久化基础设施 */
+    --s6: #008300; /* 记忆与输出 */
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink-1);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.6;
+  }
+  .container { max-width: 1120px; margin: 0 auto; padding: 40px 24px 88px; }
+  h1 { font-size: 26px; margin: 0 0 6px; }
+  .subtitle { color: var(--ink-2); margin: 0 0 28px; font-size: 14px; }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    background: var(--surface-1);
+    border: 1px solid var(--grid);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 36px;
+  }
+  .legend .chip {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 13px; color: var(--ink-1);
+    padding: 3px 10px; border: 1px solid var(--grid);
+    border-radius: 999px; background: var(--page);
+  }
+  .legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+  .legend .note { font-size: 12.5px; color: var(--muted); align-self: center; margin-left: auto; }
+  .chart-card {
+    background: var(--surface-1);
+    border: 1px solid var(--grid);
+    border-radius: 10px;
+    padding: 24px 28px 20px;
+    margin-bottom: 36px;
+  }
+  .chart-card h2 { font-size: 17px; margin: 0 0 4px; padding-left: 10px; border-left: 4px solid var(--ink-1); }
+  .chart-card .caption { color: var(--ink-2); font-size: 13.5px; margin: 0 0 16px; }
+  .mermaid { display: flex; justify-content: center; overflow-x: auto; padding: 8px 0; }
+  footer { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <h1>SuperBizAgent 系统流程图</h1>
+  <p class="subtitle">MATLAB 桌面进程监控 + AIOps 自动诊断 · 按子系统分色，状态色仅用于告警/中断/拒答</p>
+
+  <div class="legend">
+    <span class="chip"><i style="background:#2a78d6"></i>监控采集层</span>
+    <span class="chip"><i style="background:#eb6834"></i>接入层 FastAPI</span>
+    <span class="chip"><i style="background:#1baf7a"></i>Agent 执行层</span>
+    <span class="chip"><i style="background:#eda100"></i>RAG 知识层</span>
+    <span class="chip"><i style="background:#e87ba4"></i>持久化基础设施</span>
+    <span class="chip"><i style="background:#008300"></i>记忆与输出</span>
+    <span class="note">状态色：<span class="chip" style="margin-left:4px"><i style="background:#ec835a"></i>拒答</span><span class="chip"><i style="background:#fab219"></i>中断</span></span>
+  </div>
+
+  <!-- ============ 1. 全景 ============ -->
+  <section class="chart-card">
+    <h2>1 · 系统全景总览</h2>
+    <p class="caption">监控 Agent 是独立进程，与 FastAPI 通过 Webhook 解耦；HarnessWorker 把诊断变成 MySQL 持久化作业；Agent 执行时按需调用 MCP 工具和 Milvus 检索。</p>
+    <div class="mermaid">
+flowchart LR
+  subgraph L1["① 监控采集层 · 独立进程"]
+    LHM["LibreHardwareMonitor<br/>温度 Web API :8085"]
+    POLL["lhm_alert_agent.py<br/>每 5s 轮询 MATLAB.exe"]
+    CRASH["扫描 Crash Dump<br/>异常类型 / 调用栈"]
+    MCP["MCP Monitor Server :8004<br/>CPU / 内存 / 温度工具"]
+  end
+
+  subgraph L2["② 接入层 · FastAPI :9900"]
+    HB["POST /api/heartbeat"]
+    INGEST["POST /api/alerts/ingest"]
+    RUNS["POST /api/runs"]
+    CHAT["/api/chat · /api/aiops<br/>/api/upload"]
+  end
+
+  subgraph L3["③ Agent 执行层"]
+    HARN["HarnessWorker<br/>MySQL 持久化作业"]
+    GRAPH["LangGraph 诊断循环<br/>Planner → Executor → Replanner"]
+  end
+
+  subgraph L4["④ RAG 知识层"]
+    MILVUS[("Milvus :19530<br/>Dense + BM25 混合检索")]
+    BGE["BGE embedding / reranker<br/>本地推理"]
+  end
+
+  subgraph L5["⑤ 记忆与输出层"]
+    MEM["memory/ 分层记忆<br/>Hot 索引 + Cold 报告"]
+    MAIL["邮件告警"]
+    SSE["SSE 流式前端"]
+  end
+
+  LHM -->|读温度| POLL
+  POLL -->|心跳 + 快照| HB
+  POLL -->|进程消失| CRASH
+  POLL -->|温度 / 退出告警| INGEST
+  CRASH -->|携带 dump| INGEST
+  RUNS --> HARN
+  HARN -->|认领 / 恢复| GRAPH
+  INGEST -->|critical + 开关| GRAPH
+  GRAPH -->|实时指标| MCP
+  GRAPH -->|检索知识| MILVUS
+  BGE -->|向量化 / 重排| MILVUS
+  GRAPH -->|报告落盘| MEM
+  MEM -->|Hot 索引注入| GRAPH
+  INGEST -->|告警通知| MAIL
+  GRAPH -->|诊断报告| MAIL
+  GRAPH -->|流式事件| SSE
+
+  classDef blueNode fill:#d6e4f4,stroke:#2a78d6,stroke-width:1.5px,color:#0b0b0b
+  classDef orangeNode fill:#f9e1d7,stroke:#eb6834,stroke-width:1.5px,color:#0b0b0b
+  classDef aquaNode fill:#d3eee4,stroke:#1baf7a,stroke-width:1.5px,color:#0b0b0b
+  classDef yellowNode fill:#f9eccd,stroke:#eda100,stroke-width:1.5px,color:#0b0b0b
+  classDef magentaNode fill:#f8e5eb,stroke:#e87ba4,stroke-width:1.5px,color:#0b0b0b
+  classDef greenNode fill:#cfe6ce,stroke:#008300,stroke-width:1.5px,color:#0b0b0b
+
+  class LHM,POLL,CRASH,MCP blueNode
+  class HB,INGEST,RUNS,CHAT orangeNode
+  class HARN,GRAPH aquaNode
+  class MILVUS,BGE yellowNode
+  class MEM,MAIL,SSE greenNode
+    </div>
+  </section>
+
+  <!-- ============ 2. 告警链路 ============ -->
+  <section class="chart-card">
+    <h2>2 · 监控与告警链路（lhm_alert_agent）</h2>
+    <p class="caption">"进程消失"不等于崩溃——正常退出也会触发，是否为 crash 由 dump / 事件日志佐证。防误触发靠：连续超阈 60s、冷却 120s、SHA-1 去重、warning 不诊断。</p>
+    <div class="mermaid">
+flowchart TD
+  TICK([每 5 秒轮询 MATLAB.exe])
+  SAMPLE["采集 psutil CPU / 内存<br/>LHM 温度 · Top 进程"]
+  DEC1{上轮存活<br/>本轮消失?}
+  HB2["心跳 /api/heartbeat<br/>+ 本地快照"]
+  DUMP["扫描最新 crash dump<br/>解析异常类型 / 调用栈 / 错误行"]
+  SEND["POST /api/alerts/ingest<br/>Bearer Token"]
+  DEDUP{"去重<br/>SHA-1 host+sensor"}
+  KNOWN["已有 active 告警 → 忽略"]
+  MAIL2["发告警邮件<br/>asyncio.create_task 不阻塞"]
+  AUTO{"critical 且<br/>AUTO_DIAGNOSIS 开启?"}
+  DIAG["AIOps 自动诊断<br/>→ 诊断报告邮件"]
+  NOOP["仅告警，不诊断"]
+  NOTE1["防误触发<br/>连续超阈 60s · 冷却 120s<br/>warning 不触发诊断"]
+
+  TICK --> SAMPLE --> DEC1
+  DEC1 -- 否 --> HB2 --> TICK
+  DEC1 -- 是 --> DUMP --> SEND --> DEDUP
+  DEDUP -- 已有 --> KNOWN
+  DEDUP -- 新告警 --> MAIL2 --> AUTO
+  AUTO -- 是 --> DIAG
+  AUTO -- 否 --> NOOP
+  NOTE1 -.-> DEC1
+
+  classDef blueNode fill:#d6e4f4,stroke:#2a78d6,stroke-width:1.5px,color:#0b0b0b
+  classDef orangeNode fill:#f9e1d7,stroke:#eb6834,stroke-width:1.5px,color:#0b0b0b
+  classDef aquaNode fill:#d3eee4,stroke:#1baf7a,stroke-width:1.5px,color:#0b0b0b
+  classDef greenNode fill:#cfe6ce,stroke:#008300,stroke-width:1.5px,color:#0b0b0b
+  classDef mutedNode fill:#f0efec,stroke:#c3c2b7,stroke-width:1px,color:#52514e,stroke-dasharray:4
+
+  class SAMPLE,DUMP blueNode
+  class HB2,SEND orangeNode
+  class DIAG aquaNode
+  class MAIL2 greenNode
+  class NOTE1 mutedNode
+    </div>
+  </section>
+
+  <!-- ============ 3. 诊断主循环 ============ -->
+  <section class="chart-card">
+    <h2>3 · AIOps 诊断主循环（LangGraph Plan-Execute-Replanner）</h2>
+    <p class="caption">四个节点 + 一条条件边。Executor → Replanner 之间有环（最多 8 步）；Microcompact 把大工具结果落盘，防止 Replanner 上下文被撑爆。</p>
+    <div class="mermaid">
+flowchart TD
+  START2([诊断请求])
+  PLANNER["Planner 规划器<br/>注入 Hot Memory + Skill + 工具列表<br/>按需调用 retrieve_knowledge<br/>structured_output 生成 Plan<br/>失败回退默认 3 步计划"]
+  EXEC["Executor 执行器<br/>取 plan[0] · bind_tools 3本地+4MCP<br/>LLM 决策 → ToolNode 执行<br/>结果回传合成 · 追加 past_steps"]
+  MICRO{"Microcompact<br/>最新结果 >100 tokens?"}
+  ART["落盘 artifacts/<br/>替换为 摘要 + 路径"]
+  REPLAN["Replanner<br/>决策 respond / continue / replan<br/>优先级：respond > continue > replan"]
+  DEC2{有 response<br/>或 plan 为空?}
+  END2([保存报告 incidents/<br/>更新 MEMORY.md 索引])
+  HARD["硬约束<br/>MAX_STEPS = 8<br/>≥5 步禁 replan"]
+
+  START2 --> PLANNER --> EXEC --> MICRO
+  MICRO -- 是 --> ART --> REPLAN
+  MICRO -- 否 --> REPLAN
+  HARD -.约束.-> REPLAN
+  REPLAN --> DEC2
+  DEC2 -- response --> END2
+  DEC2 -- 继续执行 --> EXEC
+
+  classDef aquaNode fill:#d3eee4,stroke:#1baf7a,stroke-width:1.5px,color:#0b0b0b
+  classDef greenNode fill:#cfe6ce,stroke:#008300,stroke-width:1.5px,color:#0b0b0b
+  classDef mutedNode fill:#f0efec,stroke:#c3c2b7,stroke-width:1px,color:#52514e,stroke-dasharray:4
+
+  class PLANNER,EXEC,REPLAN aquaNode
+  class ART,END2 greenNode
+  class HARD mutedNode
+    </div>
+  </section>
+
+  <!-- ============ 4. RAG ============ -->
+  <section class="chart-card">
+    <h2>4 · RAG 混合检索管线</h2>
+    <p class="caption">Dense + BM25 并行召回 → RRF 融合 → 置信度决定是否改写重试 / 重排。语义证据不足时明确拒答"原因未确定"，而不是编造根因。阈值：low 0.35 / high 0.55。</p>
+    <div class="mermaid">
+flowchart TD
+  Q1([诊断查询])
+  DENSE["Dense 召回<br/>BGE-small-zh 512 维<br/>FLAT + IP · top 20"]
+  SPARSE["Sparse 召回<br/>Milvus BM25 中文分词<br/>top 20"]
+  RRF["RRF 融合 k=60<br/>去重后 top 20"]
+  CONF{"置信度计算<br/>标记命中 · 词汇覆盖<br/>来源集中度 · 可信度"}
+  REWRITE["规则化查询改写<br/>仅重试 1 次"]
+  RERANK["CrossEncoder 重排<br/>权重 0.20"]
+  OUT["Top 5 证据文档"]
+  EVID["证据上下文组装<br/>事实 / 检索证据 / 推断"]
+  CHECK{"语义证据<br/>≥ 0.55?"}
+  REFUSE["拒答：原因未确定<br/>列出需补充的日志"]
+  GEN["生成诊断报告"]
+
+  Q1 --> DENSE
+  Q1 --> SPARSE
+  DENSE --> RRF
+  SPARSE --> RRF
+  RRF --> CONF
+  CONF -- 高 ≥0.55 --> OUT
+  CONF -- 中 --> RERANK --> OUT
+  CONF -- 低 <0.35 --> REWRITE -->|改写后重试| DENSE
+  OUT --> EVID --> CHECK
+  CHECK -- 是 --> GEN
+  CHECK -- 否 --> REFUSE
+
+  classDef yellowNode fill:#f9eccd,stroke:#eda100,stroke-width:1.5px,color:#0b0b0b
+  classDef aquaNode fill:#d3eee4,stroke:#1baf7a,stroke-width:1.5px,color:#0b0b0b
+  classDef refuseNode fill:#ec835a,stroke:#b4532f,stroke-width:1.5px,color:#ffffff
+
+  class DENSE,SPARSE,RRF,CONF,REWRITE,RERANK,OUT,EVID,CHECK yellowNode
+  class GEN aquaNode
+  class REFUSE refuseNode
+    </div>
+  </section>
+
+  <!-- ============ 5. Harness ============ -->
+  <section class="chart-card">
+    <h2>5 · Agent Harness 持久化执行（v1 新增）</h2>
+    <p class="caption">MySQL 是唯一事实源：作业状态、步骤、工具调用、SSE 事件全部落库。Worker 崩溃后 lease 过期 → 其他 Worker 认领并从 state_json 恢复；幂等键命中时直接复用已成功的结果，不重复执行。</p>
+    <div class="mermaid">
+flowchart TD
+  R1["POST /api/runs<br/>task + session_id"]
+  DB1[("MySQL · agent_runs<br/>status = queued")]
+  CLAIM["HarnessWorker 认领<br/>行锁 + lease 30s 续租"]
+  EXEC2["执行计划步骤<br/>agent_steps 落库"]
+  GW["ToolGateway<br/>参数校验 · 超时 10s<br/>仅重试瞬态失败 · 幂等键去重<br/>大结果落 artifact"]
+  EVT[("agent_run_events<br/>SSE 可重放 Last-Event-ID")]
+  CRASH{Worker 崩溃?<br/>lease 过期}
+  INTER["status → interrupted"]
+  RESUME["新 Worker 认领<br/>从 state_json 恢复<br/>幂等键命中 → 复用结果"]
+  DONE([status = succeeded<br/>final_report 落库])
+
+  R1 --> DB1 --> CLAIM --> EXEC2
+  EXEC2 -->|执行步骤| GW
+  GW -->|下一步| EXEC2
+  GW -->|写入事件| EVT
+  EVT --> CRASH
+  CRASH -- 否 --> DONE
+  CRASH -- 是 --> INTER --> RESUME -->|恢复执行| EXEC2
+
+  classDef orangeNode fill:#f9e1d7,stroke:#eb6834,stroke-width:1.5px,color:#0b0b0b
+  classDef magentaNode fill:#f8e5eb,stroke:#e87ba4,stroke-width:1.5px,color:#0b0b0b
+  classDef aquaNode fill:#d3eee4,stroke:#1baf7a,stroke-width:1.5px,color:#0b0b0b
+  classDef warnNode fill:#fab219,stroke:#c98500,stroke-width:1.5px,color:#0b0b0b
+
+  class R1 orangeNode
+  class DB1,EVT,GW magentaNode
+  class CLAIM,EXEC2,RESUME,DONE aquaNode
+  class INTER warnNode
+    </div>
+  </section>
+
+  <!-- ============ 6. 分层记忆 ============ -->
+  <section class="chart-card">
+    <h2>6 · 分层记忆（Hot / Cold）</h2>
+    <p class="caption">Hot 层每次 Planner 启动都加载（低成本上下文）；Cold 层只在回溯时查看。诊断报告还可以重新入库参与后续召回，形成闭环。</p>
+    <div class="mermaid">
+flowchart LR
+  WRITE["诊断完成<br/>save_incident"]
+  HOT["Hot 层 · MEMORY.md<br/>摘要索引（≤20 条）<br/>每轮 Planner 加载"]
+  COLD1["Cold 层 · incidents/<br/>完整诊断报告"]
+  COLD2["Cold 层 · artifacts/<br/>工具结果原文"]
+  RERAG["可选：重新入库<br/>参与后续召回"]
+
+  WRITE --> COLD1
+  COLD1 -->|提取摘要| HOT
+  WRITE -.->|Microcompact 落盘| COLD2
+  COLD1 -.->|重新入库| RERAG
+
+  classDef greenNode fill:#cfe6ce,stroke:#008300,stroke-width:1.5px,color:#0b0b0b
+
+  class WRITE,HOT,COLD1,COLD2,RERAG greenNode
+    </div>
+  </section>
+
+  <footer>
+    数据来源：README.md · HARNESS_V1.md · 面试问题.md · 代码实现（2026-09-10 生成）·
+    图上数据对应当时的配置，如需精确口径请以代码为准。
+  </footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    securityLevel: 'loose',
+    flowchart: { curve: 'basis', useMaxWidth: true, htmlLabels: true },
+    themeVariables: {
+      fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif',
+      fontSize: '14px',
+      primaryColor: '#f0efec',
+      primaryTextColor: '#0b0b0b',
+      primaryBorderColor: 'rgba(11,11,11,0.10)',
+      lineColor: '#c3c2b7',
+      clusterBkg: '#f0efec',
+      clusterBorder: 'rgba(11,11,11,0.10)',
+      edgeLabelBackground: '#fcfcfb'
+    }
+  });
+</script>
+</body>
+</html>

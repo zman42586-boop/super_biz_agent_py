@@ -16,6 +16,7 @@ from app.core.llm_factory import llm_factory
 from app.harness.config import harness_settings
 from app.memory import load_memory_context
 from app.tools import get_current_time, retrieve_knowledge, search_log
+from app.utils.token_meter import log_token_budget
 
 from .state import PlanExecuteState
 from .utils import format_tools_description
@@ -112,7 +113,9 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
         try:
             # retrieve_knowledge 使用 response_format="content_and_artifact"
             # ainvoke() 只返回 content（字符串），不是元组
-            context_str = await retrieve_knowledge.ainvoke({"query": input_text})
+            context_str = await retrieve_knowledge.ainvoke(
+                {"query": input_text, "mode": "plan"}
+            )
             if context_str and context_str.strip():
                 experience_docs = context_str
                 logger.info(f"找到相关经验文档，长度: {len(experience_docs)}")
@@ -170,6 +173,17 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
         )
 
         planner_chain = planner_prompt | llm.with_structured_output(Plan, method="function_calling")
+
+        log_token_budget(
+            "PlannerInput",
+            {
+                "task": input_text,
+                "tools": tools_description,
+                "skills": skills_description,
+                "memory": memory_context,
+                "experience": experience_context,
+            },
+        )
 
         # 调用 LLM 生成计划
         plan_result = await planner_chain.ainvoke({

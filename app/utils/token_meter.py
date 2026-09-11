@@ -7,11 +7,10 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Mapping, Sequence
 
 from langchain_core.messages import BaseMessage
 from loguru import logger
-
 
 # 字符/token 估算比例（中英混合约 3-4 字符/token）
 _CHARS_PER_TOKEN = 4
@@ -43,6 +42,23 @@ def count_steps_tokens(past_steps: list[tuple]) -> int:
     total = 0
     for step, result in past_steps:
         total += count_tokens(str(step)) + count_tokens(str(result))
+    return total
+
+
+def log_token_budget(stage: str, sections: Mapping[str, object]) -> int:
+    """记录一次 LLM 输入的估算 token 构成并返回总数。
+
+    该统计用于发现上下文重复或异常膨胀。它基于字符估算，不等同于模型
+    API 返回的计费 token；精确计费应以供应商响应中的 usage 为准。
+    """
+    counts = {
+        name: count_tokens(str(content))
+        for name, content in sections.items()
+        if content
+    }
+    total = sum(counts.values())
+    breakdown = ", ".join(f"{name}={value}" for name, value in counts.items())
+    logger.info(f"[{stage:<12}] estimated_input={total} ({breakdown})")
     return total
 
 
