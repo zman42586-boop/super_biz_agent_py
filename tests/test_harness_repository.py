@@ -90,3 +90,78 @@ def test_cancel_and_manual_resume(tmp_path) -> None:
 
     resumed = repository.resume_run(run["id"])
     assert resumed["status"] == "pending"
+
+
+def test_agentops_metrics_and_quality_evaluation(tmp_path) -> None:
+    repository = _repository(tmp_path)
+
+    succeeded = repository.create_run(task="diagnose success", session_id="metrics-1")
+    repository.claim_next_run("worker-1", lease_seconds=30)
+    step = repository.start_step(succeeded["id"], 0, "query logs")
+    call, _ = repository.begin_tool_call(
+        run_id=succeeded["id"],
+        step_id=step["id"],
+        tool_name="query_logs",
+        arguments={"host": "local"},
+        idempotency_key="metrics-tool-key",
+    )
+    repository.fail_tool_call(
+        call["id"],
+        error_code="TOOL_TIMEOUT",
+        error_message="temporary timeout",
+        latency_ms=10,
+        terminal=False,
+    )
+    retried, cached = repository.begin_tool_call(
+        run_id=succeeded["id"],
+        step_id=step["id"],
+        tool_name="query_logs",
+        arguments={"host": "local"},
+        idempotency_key="metrics-tool-key",
+    )
+    assert cached is False
+    repository.complete_tool_call(retried["id"], result={"content": "ok"}, latency_ms=20)
+    repository.complete_step(step["id"], output="found evidence")
+    repository.append_event(succeeded["id"], "loop_guard_triggered", {"reason": "test"})
+    repository.append_event(succeeded["id"], "run_resumed", {"reason": "test"})
+    repository.finish_run(succeeded["id"], "report")
+
+    failed = repository.create_run(task="diagnose failure", session_id="metrics-2")
+    repository.claim_next_run("worker-1", lease_seconds=30)
+    repository.fail_run(failed["id"], "RUN_TIMEOUT", "timed out")
+    repository.create_run(task="still queued", session_id="metrics-3")
+
+    evaluation = repository.record_evaluation(
+        succeeded["id"],
+        experiment_name="agentops-v1",
+        evaluator_name="human-review",
+        score=8.5,
+        passed=True,
+        metrics={"root_cause_accuracy": 0.9},
+        comment="root cause and evidence are correct",
+    )
+    assert evaluation["score"] == 8.5
+    assert repository.list_evaluations(succeeded["id"])[0]["passed"] is True
+
+    summary = repository.get_metrics_summary(window_hours=24)
+    assert summary["runs"]["total"] == 3
+    assert summary["runs"]["status_counts"]["succeeded"] == 1
+    assert summary["runs"]["status_counts"]["failed"] == 1
+    assert summary["runs"]["success_rate"] == 0.5
+    assert summary["runs"]["average_steps"] == 0.3333
+    assert summary["runs"]["loop_guard_rate"] == 0.3333
+    assert summary["runs"]["recovery_rate"] == 0.3333
+    assert summary["runs"]["error_codes"] == {"RUN_TIMEOUT": 1}
+    assert summary["tools"]["retry_rate"] == 1.0
+    assert summary["tools"]["success_rate"] == 1.0
+    assert summary["tools"]["latency_ms"]["p95"] == 20
+    assert summary["quality"]["average_score"] == 8.5
+    assert summary["quality"]["pass_rate"] == 1.0
+
+
+def test_empty_agentops_metrics_use_null_rates(tmp_path) -> None:
+    summary = _repository(tmp_path).get_metrics_summary(window_hours=24)
+    assert summary["runs"]["total"] == 0
+    assert summary["runs"]["success_rate"] is None
+    assert summary["tools"]["latency_ms"]["p95"] is None
+    assert summary["quality"]["average_score"] is None

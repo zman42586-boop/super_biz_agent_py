@@ -76,6 +76,16 @@ POST /api/runs/{run_id}/cancel
 POST /api/runs/{run_id}/resume
 ```
 
+AgentOps v1 additionally exposes operational metrics and persisted quality feedback:
+
+```text
+GET  /api/runs/metrics/summary?window_hours=24&kind=alert_diagnosis
+GET  /api/runs/{run_id}/evaluations
+POST /api/runs/{run_id}/evaluations
+```
+
+See `AGENTOPS_V1.md` for metric definitions and the baseline/candidate comparison workflow.
+
 ## Automatic alert diagnosis
 
 `POST /api/alerts/ingest` keeps the existing alert deduplication behavior. When a new or

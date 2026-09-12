@@ -13,7 +13,15 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.harness.config import HarnessSettings, harness_settings
-from app.harness.models import AgentRun, AgentStep, Base, RunEvent, ToolCall, utc_now
+from app.harness.models import (
+    AgentRun,
+    AgentStep,
+    Base,
+    RunEvaluation,
+    RunEvent,
+    ToolCall,
+    utc_now,
+)
 
 TERMINAL_RUN_STATUSES = {"succeeded", "failed", "cancelled"}
 
@@ -132,6 +140,163 @@ class HarnessRepository:
                 }
                 for row in rows
             ]
+
+    def record_evaluation(
+        self,
+        run_id: str,
+        *,
+        experiment_name: str,
+        evaluator_name: str,
+        score: float,
+        passed: bool,
+        metrics: dict[str, float] | None = None,
+        comment: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist a quality score so production feedback can join Harness telemetry."""
+        with self._session_factory.begin() as session:
+            if session.get(AgentRun, run_id) is None:
+                raise KeyError(f"Run not found: {run_id}")
+            evaluation = RunEvaluation(
+                run_id=run_id,
+                experiment_name=experiment_name,
+                evaluator_name=evaluator_name,
+                score=score,
+                passed=passed,
+                metrics_json=_json_safe(metrics or {}),
+                comment=(comment or "")[:4000] or None,
+                created_at=utc_now(),
+            )
+            session.add(evaluation)
+            session.flush()
+            self._append_event(
+                session,
+                run_id,
+                "run_evaluated",
+                {
+                    "evaluation_id": evaluation.id,
+                    "experiment_name": experiment_name,
+                    "evaluator_name": evaluator_name,
+                    "score": score,
+                    "passed": passed,
+                },
+            )
+            return self._evaluation_dict(evaluation)
+
+    def list_evaluations(self, run_id: str) -> list[dict[str, Any]]:
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(RunEvaluation)
+                .where(RunEvaluation.run_id == run_id)
+                .order_by(RunEvaluation.id)
+            ).all()
+            return [self._evaluation_dict(row) for row in rows]
+
+    def get_metrics_summary(
+        self,
+        *,
+        window_hours: int = 24,
+        kind: str | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate portable AgentOps metrics from durable Harness records.
+
+        Percentiles are calculated in Python because MySQL and SQLite do not share a
+        percentile aggregate. The API bounds the time window to keep this v1 query small.
+        """
+        now = utc_now()
+        since = now - timedelta(hours=window_hours)
+        with self._session_factory() as session:
+            run_query = select(AgentRun).where(AgentRun.created_at >= since)
+            if kind:
+                run_query = run_query.where(AgentRun.kind == kind)
+            runs = list(session.scalars(run_query.order_by(AgentRun.created_at)).all())
+            run_ids = [run.id for run in runs]
+
+            if run_ids:
+                steps = list(
+                    session.scalars(select(AgentStep).where(AgentStep.run_id.in_(run_ids))).all()
+                )
+                tool_calls = list(
+                    session.scalars(select(ToolCall).where(ToolCall.run_id.in_(run_ids))).all()
+                )
+                events = list(
+                    session.scalars(select(RunEvent).where(RunEvent.run_id.in_(run_ids))).all()
+                )
+                evaluations = list(
+                    session.scalars(
+                        select(RunEvaluation).where(RunEvaluation.run_id.in_(run_ids))
+                    ).all()
+                )
+            else:
+                steps, tool_calls, events, evaluations = [], [], [], []
+
+        status_counts = {
+            status: sum(run.status == status for run in runs)
+            for status in ("pending", "running", "interrupted", "succeeded", "failed", "cancelled")
+        }
+        decided = status_counts["succeeded"] + status_counts["failed"]
+        run_latencies = [
+            int((run.finished_at - run.started_at).total_seconds() * 1000)
+            for run in runs
+            if run.started_at and run.finished_at
+        ]
+        tool_latencies = [call.latency_ms for call in tool_calls if call.latency_ms is not None]
+        terminal_tool_calls = [
+            call for call in tool_calls if call.status in {"succeeded", "failed"}
+        ]
+        loop_guard_run_ids = {
+            event.run_id for event in events if event.event_type == "loop_guard_triggered"
+        }
+        recovered_run_ids = {
+            event.run_id
+            for event in events
+            if event.event_type in {"run_interrupted", "run_resumed"}
+        }
+        error_codes: dict[str, int] = {}
+        for run in runs:
+            if run.error_code:
+                error_codes[run.error_code] = error_codes.get(run.error_code, 0) + 1
+
+        return {
+            "window": {
+                "hours": window_hours,
+                "since": _dt(since),
+                "until": _dt(now),
+                "kind": kind,
+            },
+            "runs": {
+                "total": len(runs),
+                "status_counts": status_counts,
+                "success_rate": self._ratio(status_counts["succeeded"], decided),
+                "latency_ms": self._distribution(run_latencies),
+                "average_steps": self._average(len(steps), len(runs)),
+                "average_tool_calls": self._average(len(tool_calls), len(runs)),
+                "loop_guard_rate": self._ratio(len(loop_guard_run_ids), len(runs)),
+                "recovery_rate": self._ratio(len(recovered_run_ids), len(runs)),
+                "error_codes": error_codes,
+            },
+            "tools": {
+                "total": len(tool_calls),
+                "success_rate": self._ratio(
+                    sum(call.status == "succeeded" for call in terminal_tool_calls),
+                    len(terminal_tool_calls),
+                ),
+                "retry_rate": self._ratio(
+                    sum(call.attempt_count > 1 for call in tool_calls), len(tool_calls)
+                ),
+                "latency_ms": self._distribution(tool_latencies),
+            },
+            "quality": {
+                "evaluation_count": len(evaluations),
+                "average_score": (
+                    round(sum(row.score for row in evaluations) / len(evaluations), 4)
+                    if evaluations
+                    else None
+                ),
+                "pass_rate": self._ratio(
+                    sum(row.passed for row in evaluations), len(evaluations)
+                ),
+            },
+        }
 
     def append_event(self, run_id: str, event_type: str, payload: dict) -> int:
         with self._session_factory.begin() as session:
@@ -604,6 +769,46 @@ class HarnessRepository:
             "finished_at": _dt(call.finished_at),
             "created_at": _dt(call.created_at),
             "updated_at": _dt(call.updated_at),
+        }
+
+    @staticmethod
+    def _evaluation_dict(evaluation: RunEvaluation) -> dict[str, Any]:
+        return {
+            "id": evaluation.id,
+            "run_id": evaluation.run_id,
+            "experiment_name": evaluation.experiment_name,
+            "evaluator_name": evaluation.evaluator_name,
+            "score": evaluation.score,
+            "passed": evaluation.passed,
+            "metrics": evaluation.metrics_json,
+            "comment": evaluation.comment,
+            "created_at": _dt(evaluation.created_at),
+        }
+
+    @staticmethod
+    def _ratio(numerator: int, denominator: int) -> float | None:
+        return round(numerator / denominator, 4) if denominator else None
+
+    @staticmethod
+    def _average(total: int, count: int) -> float | None:
+        return round(total / count, 4) if count else None
+
+    @staticmethod
+    def _distribution(values: list[int]) -> dict[str, float | int | None]:
+        if not values:
+            return {"count": 0, "average": None, "p50": None, "p95": None, "max": None}
+        ordered = sorted(values)
+
+        def percentile(percent: float) -> int:
+            index = max(0, min(len(ordered) - 1, int((len(ordered) - 1) * percent + 0.5)))
+            return ordered[index]
+
+        return {
+            "count": len(ordered),
+            "average": round(sum(ordered) / len(ordered), 2),
+            "p50": percentile(0.50),
+            "p95": percentile(0.95),
+            "max": ordered[-1],
         }
 
 

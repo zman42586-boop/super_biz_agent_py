@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import glob
 import json
@@ -20,6 +21,7 @@ import sys
 import time
 from pathlib import Path
 
+from app.evaluation.experiment import build_experiment_report, compare_experiments
 from app.models.alert import AlertEvidence, AlertRecord
 from app.services.aiops_service import aiops_service
 from tests.eval_judge import EvalScore, judge_report, load_scenario
@@ -192,11 +194,22 @@ def _load_last_score() -> tuple[float | None, dict | None]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the AIOps offline evaluation dataset")
+    parser.add_argument("--scenario", help="Run one scenario id, for example 01")
+    parser.add_argument("--experiment", default="local", help="Version/experiment name")
+    parser.add_argument("--output", type=Path, help="Write a versioned JSON experiment report")
+    parser.add_argument("--baseline", type=Path, help="Compare output with a previous report")
+    parser.add_argument(
+        "--fail-on-regression",
+        action="store_true",
+        help="Exit with code 2 when the baseline release gate fails",
+    )
+    args = parser.parse_args()
     files = sorted(glob.glob(os.path.join(SCENARIOS_DIR, "scenario_*.json")))
 
-    single_scenario = len(sys.argv) >= 3 and sys.argv[1] == "--scenario"
+    single_scenario = bool(args.scenario)
     if single_scenario:
-        sid = sys.argv[2]
+        sid = args.scenario
         files = [f for f in files if f"scenario_{sid}" in f]
         if not files:
             print(f"未找到 scenario_{sid}")
@@ -222,6 +235,41 @@ def main() -> None:
 
     if not single_scenario:
         _save_score(judge_avg, retrieval_avg)
+
+    cases = []
+    for scenario, _report, score, retrieval in results:
+        cases.append(
+            {
+                "id": scenario["id"],
+                "name": scenario["name"],
+                "judge_score": score.score if score else None,
+                "judge": score.model_dump() if score else None,
+                "retrieval": (
+                    {
+                        "recall_at_k": retrieval["recall_at_k"],
+                        "precision_at_k": retrieval["precision_at_k"],
+                        "mrr": retrieval["mrr"],
+                    }
+                    if retrieval and not retrieval.get("skipped", True)
+                    else None
+                ),
+            }
+        )
+    experiment = build_experiment_report(args.experiment, cases)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(
+            json.dumps(experiment, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"实验报告已写入: {args.output}")
+
+    if args.baseline:
+        baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
+        comparison = compare_experiments(baseline, experiment)
+        print("\nRelease gate:")
+        print(json.dumps(comparison, ensure_ascii=False, indent=2))
+        if args.fail_on_regression and not comparison["passed"]:
+            sys.exit(2)
 
 
 if __name__ == "__main__":

@@ -28,9 +28,31 @@ def test_run_api_create_inspect_cancel_and_resume(tmp_path, monkeypatch) -> None
     assert fetched.status_code == 200
     assert fetched.json()["status"] == "pending"
 
+    metrics = client.get("/api/runs/metrics/summary?window_hours=24")
+    assert metrics.status_code == 200
+    assert metrics.json()["runs"]["total"] == 1
+
     steps = client.get(f"/api/runs/{run_id}/steps")
     assert steps.status_code == 200
     assert steps.json() == {"run_id": run_id, "steps": []}
+
+    evaluated = client.post(
+        f"/api/runs/{run_id}/evaluations",
+        json={
+            "experiment_name": "candidate-v1",
+            "evaluator_name": "human-review",
+            "score": 9,
+            "passed": True,
+            "metrics": {"root_cause_accuracy": 1},
+            "comment": "correct diagnosis",
+        },
+    )
+    assert evaluated.status_code == 201
+    assert evaluated.json()["score"] == 9
+
+    evaluations = client.get(f"/api/runs/{run_id}/evaluations")
+    assert evaluations.status_code == 200
+    assert evaluations.json()["evaluations"][0]["experiment_name"] == "candidate-v1"
 
     cancelled = client.post(f"/api/runs/{run_id}/cancel")
     assert cancelled.json()["status"] == "cancelled"

@@ -23,6 +23,15 @@ class CreateRunRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class RecordEvaluationRequest(BaseModel):
+    experiment_name: str = Field(default="online", min_length=1, max_length=128)
+    evaluator_name: str = Field(min_length=1, max_length=128)
+    score: float = Field(ge=0, le=10)
+    passed: bool
+    metrics: dict[str, float] = Field(default_factory=dict)
+    comment: str | None = Field(default=None, max_length=4000)
+
+
 async def _repository_call(method_name: str, *args, **kwargs):
     try:
         repository = await asyncio.to_thread(get_harness_repository)
@@ -49,6 +58,17 @@ async def create_run(request: CreateRunRequest) -> dict:
     )
 
 
+@router.get("/runs/metrics/summary")
+async def get_metrics_summary(
+    window_hours: int = Query(default=24, ge=1, le=24 * 30),
+    kind: str | None = Query(default=None, pattern=r"^[a-z0-9_-]{1,32}$"),
+) -> dict:
+    """Return online reliability, latency and quality metrics for a fixed window."""
+    return await _repository_call(
+        "get_metrics_summary", window_hours=window_hours, kind=kind
+    )
+
+
 @router.get("/runs/{run_id}")
 async def get_run(run_id: str) -> dict:
     run = await _repository_call("get_run", run_id)
@@ -72,6 +92,32 @@ async def list_run_steps(run_id: str) -> dict:
     for step in steps:
         step["tool_calls"] = calls_by_step.get(int(step["id"]), [])
     return {"run_id": run_id, "steps": steps}
+
+
+@router.get("/runs/{run_id}/evaluations")
+async def list_run_evaluations(run_id: str) -> dict:
+    run = await _repository_call("get_run", run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    evaluations = await _repository_call("list_evaluations", run_id)
+    return {"run_id": run_id, "evaluations": evaluations}
+
+
+@router.post("/runs/{run_id}/evaluations", status_code=status.HTTP_201_CREATED)
+async def record_run_evaluation(run_id: str, request: RecordEvaluationRequest) -> dict:
+    run = await _repository_call("get_run", run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return await _repository_call(
+        "record_evaluation",
+        run_id,
+        experiment_name=request.experiment_name,
+        evaluator_name=request.evaluator_name,
+        score=request.score,
+        passed=request.passed,
+        metrics=request.metrics,
+        comment=request.comment,
+    )
 
 
 @router.post("/runs/{run_id}/cancel")

@@ -4,7 +4,18 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -119,3 +130,26 @@ class RunEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
 
     __table_args__ = (Index("idx_agent_run_events_run_id", "run_id", "id"),)
+
+
+class RunEvaluation(Base):
+    """A human, rule-based or model-based quality score for one completed Run."""
+
+    __tablename__ = "agent_run_evaluations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    experiment_name: Mapped[str] = mapped_column(String(128), nullable=False, default="online")
+    evaluator_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    metrics_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    comment: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
+
+    __table_args__ = (
+        Index("idx_run_evaluations_run_created", "run_id", "created_at"),
+        Index("idx_run_evaluations_experiment", "experiment_name", "created_at"),
+    )
