@@ -11,7 +11,7 @@ from langchain_openai import ChatOpenAI
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from app.agent.mcp_client import get_mcp_client_with_retry
+from app.agent.mcp_client import get_mcp_tools_with_circuit_breaker
 from app.core.llm_factory import llm_factory
 from app.harness.config import harness_settings
 from app.tools import get_current_time, retrieve_knowledge
@@ -161,8 +161,7 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
         ]
 
         # 获取 MCP 工具
-        mcp_client = await get_mcp_client_with_retry()
-        mcp_tools = await mcp_client.get_tools()
+        mcp_tools = await get_mcp_tools_with_circuit_breaker()
 
         # 合并所有工具
         all_tools = local_tools + mcp_tools

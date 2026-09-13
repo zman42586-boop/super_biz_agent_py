@@ -10,7 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from app.agent.mcp_client import get_mcp_client_with_retry
+from app.agent.mcp_client import get_mcp_tools_with_circuit_breaker
 from app.claude_skills import load_skills_description
 from app.core.llm_factory import llm_factory
 from app.harness.config import harness_settings
@@ -134,8 +134,7 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
 
         # 获取 MCP 工具（失败时降级为仅本地工具）
         try:
-            mcp_client = await get_mcp_client_with_retry()
-            mcp_tools = await mcp_client.get_tools()
+            mcp_tools = await get_mcp_tools_with_circuit_breaker()
         except Exception as e:
             logger.warning(f"获取 MCP 工具失败: {e}")
             mcp_tools = []

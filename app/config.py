@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     # MCP 服务配置 — 本机监控数据采集（CPU / 内存 / LHM 温度）
     mcp_monitor_transport: str = "streamable-http"
     mcp_monitor_url: str = "http://localhost:8004/mcp"
+    # MCP 工具发现失败后短路降级，避免 Planner/Executor/Replanner 重复等待
+    mcp_circuit_failure_threshold: int = 1
+    mcp_circuit_cooldown_seconds: float = 30.0
 
     # SMTP 邮件配置
     smtp_host: str = "smtp.163.com"

@@ -20,7 +20,7 @@ from langchain_openai import ChatOpenAI
 
 from app.config import config
 from app.tools import get_current_time, retrieve_knowledge, search_log
-from app.agent.mcp_client import get_mcp_client_with_retry
+from app.agent.mcp_client import get_mcp_tools_with_circuit_breaker
 from app.core.llm_factory import llm_factory
 from app.memory import load_memory_context
 from app.utils.token_meter import count_state_tokens, log_compression
@@ -123,8 +123,7 @@ class RagAgentService:
 
         # 尝试加载 MCP 工具，失败时降级为仅本地工具
         try:
-            mcp_client = await get_mcp_client_with_retry()
-            self.mcp_tools = await mcp_client.get_tools()
+            self.mcp_tools = await get_mcp_tools_with_circuit_breaker()
             logger.info(f"成功加载 {len(self.mcp_tools)} 个 MCP 工具")
         except Exception as e:
             self.mcp_tools = []
