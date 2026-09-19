@@ -119,6 +119,9 @@ docker compose -f vector-database.yml ps
 .\start-windows.bat
 ```
 
+启动脚本默认创建 3 个独立 Harness Worker 进程，以便并行认领不同的 Run。如需调整，
+可在启动脚本前设置 `HARNESS_WORKER_COUNT`；单个 Worker 同一时刻仍只执行一个 Run。
+
 单独启动监控 Agent：
 
 ```powershell

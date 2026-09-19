@@ -92,10 +92,13 @@ if errorlevel 1 (
 
 REM Start durable Harness worker after FastAPI and MySQL are ready
 echo.
-echo [5/6] Starting Agent Harness Worker...
-start "Agent Harness Worker" /min %PYTHON_CMD% scripts/harness_worker.py
+if not defined HARNESS_WORKER_COUNT set "HARNESS_WORKER_COUNT=3"
+echo [5/6] Starting !HARNESS_WORKER_COUNT! Agent Harness Workers...
+for /L %%i in (1,1,!HARNESS_WORKER_COUNT!) do (
+    start "Agent Harness Worker %%i" /min %PYTHON_CMD% scripts/harness_worker.py
+)
 timeout /t 2 /nobreak >nul
-echo [OK] Agent Harness Worker started
+echo [OK] !HARNESS_WORKER_COUNT! Agent Harness Workers started
 
 REM Start LHM Alert Agent after FastAPI is ready
 echo.
