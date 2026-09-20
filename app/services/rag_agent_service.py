@@ -3,7 +3,8 @@
 使用 ChatOpenAI (OpenAI 兼容模式) 支持多模型提供商。
 """
 
-from typing import Annotated, Any, AsyncGenerator, Dict, Sequence
+from collections.abc import AsyncGenerator, Sequence
+from typing import Annotated, Any
 
 from langchain.agents import create_agent
 from langchain_core.messages import (
@@ -16,13 +17,14 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from loguru import logger
 from typing_extensions import TypedDict
-from langchain_openai import ChatOpenAI
 
-from app.config import config
-from app.tools import get_current_time, retrieve_knowledge, search_log
 from app.agent.mcp_client import get_mcp_tools_with_circuit_breaker
+from app.agent.tool_selector import select_tools_for_task
+from app.config import config
 from app.core.llm_factory import llm_factory
 from app.memory import load_memory_context
+from app.tools import get_current_time, retrieve_knowledge, search_log
+from app.tools.catalog import tool_name
 from app.utils.token_meter import count_state_tokens, log_compression
 
 # Level 1 Snip：超过此 token 估算值时触发裁剪（演示模式：300 tokens ≈ 1200 字符，几轮对话后触发）
@@ -43,6 +45,7 @@ def _unwrap_exception(exc: Exception) -> str:
 
 class AgentState(TypedDict):
     """Agent 状态"""
+
     messages: Annotated[Sequence[BaseMessage], add_messages]
 
 
@@ -58,7 +61,6 @@ class RagAgentService:
         self.model_name = config.rag_model
         self.streaming = streaming
         self.system_prompt = self._build_system_prompt()
-
 
         self.model = llm_factory.create_chat_model(
             model=self.model_name,
@@ -79,19 +81,21 @@ class RagAgentService:
         self.agent = None
         self._agent_initialized = False
 
-        logger.info(f"RAG Agent 服务初始化完成 (ChatOpenAI), model={self.model_name}, streaming={streaming}")
+        logger.info(
+            f"RAG Agent 服务初始化完成 (ChatOpenAI), model={self.model_name}, streaming={streaming}"
+        )
 
-    async def _apply_snip(self, session_id: str) -> None:
+    async def _apply_snip(self, session_id: str, agent: Any) -> None:
         """Level 1 Snip：当会话历史超过 token 阈值时，裁剪旧消息。
 
         策略：保留第一条系统消息 + 最近 _SNIP_KEEP_RECENT 条非系统消息。
         通过 LangGraph 的 aupdate_state 直接修改检查点，下次调用时生效。
         """
-        if self.agent is None:
+        if agent is None:
             return
 
         config_dict = {"configurable": {"thread_id": session_id}}
-        state = self.agent.get_state(config_dict)
+        state = agent.get_state(config_dict)
         if not state or not state.values:
             return
 
@@ -111,7 +115,7 @@ class RagAgentService:
         after_tokens = count_state_tokens(new_messages)
         log_compression("Snip", before_tokens, after_tokens)
 
-        await self.agent.aupdate_state(
+        await agent.aupdate_state(
             config_dict,
             {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *new_messages]},
         )
@@ -129,19 +133,24 @@ class RagAgentService:
             self.mcp_tools = []
             logger.warning(f"MCP 工具加载失败（将仅使用本地工具）: {_unwrap_exception(e)}")
 
-        all_tools = self.tools + self.mcp_tools
-
-        self.agent = create_agent(
-            self.model,
-            tools=all_tools,
-            checkpointer=self.checkpointer,
-        )
-
         self._agent_initialized = True
 
+        all_tools = self.tools + self.mcp_tools
         if all_tools:
-            tool_names = [tool.name if hasattr(tool, "name") else str(tool) for tool in all_tools]
+            tool_names = [tool_name(tool) for tool in all_tools]
             logger.info(f"可用工具列表: {', '.join(tool_names)}")
+
+    async def _create_agent_for_question(self, question: str):
+        """Create an agent with only the schemas selected for this question."""
+
+        await self._initialize_agent()
+        available_tools = self.tools + self.mcp_tools
+        selected_tools = await select_tools_for_task(question, available_tools)
+        return create_agent(
+            self.model,
+            tools=selected_tools,
+            checkpointer=self.checkpointer,
+        )
 
     def _build_system_prompt(self) -> str:
         """
@@ -189,39 +198,29 @@ class RagAgentService:
             str: 完整答案
         """
         try:
-            await self._initialize_agent()
-            await self._apply_snip(session_id)  # Level 1 Snip
+            agent = await self._create_agent_for_question(question)
+            self.agent = agent
+            await self._apply_snip(session_id, agent)  # Level 1 Snip
 
             logger.info(f"[会话 {session_id}] RAG Agent 收到查询（非流式）: {question}")
 
             # 构建系统提示：基础 prompt + 最新长期记忆
             memory_ctx = load_memory_context()
             if memory_ctx:
-                system_content = (
-                    f"{self.system_prompt}\n\n"
-                    f"## 长期记忆参考\n\n"
-                    f"{memory_ctx}"
-                )
+                system_content = f"{self.system_prompt}\n\n" f"## 长期记忆参考\n\n" f"{memory_ctx}"
             else:
                 system_content = self.system_prompt
 
             # 构建消息列表（系统提示 + 用户问题）
-            messages = [
-                SystemMessage(content=system_content),
-                HumanMessage(content=question)
-            ]
+            messages = [SystemMessage(content=system_content), HumanMessage(content=question)]
 
             # 构建 Agent 输入
             agent_input = {"messages": messages}
 
             # 配置 thread_id（用于会话持久化）
-            config_dict = {
-                "configurable": {
-                    "thread_id": session_id
-                }
-            }
+            config_dict = {"configurable": {"thread_id": session_id}}
 
-            result = await self.agent.ainvoke(
+            result = await agent.ainvoke(
                 input=agent_input,
                 config=config_dict,
             )
@@ -230,7 +229,9 @@ class RagAgentService:
             messages_result = result.get("messages", [])
             if messages_result:
                 last_message = messages_result[-1]
-                answer = last_message.content if hasattr(last_message, 'content') else str(last_message)
+                answer = (
+                    last_message.content if hasattr(last_message, "content") else str(last_message)
+                )
 
                 # 记录工具调用
                 if hasattr(last_message, "tool_calls") and last_message.tool_calls:
@@ -252,7 +253,7 @@ class RagAgentService:
         self,
         question: str,
         session_id: str,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """
         流式处理用户问题（逐步返回答案片段）
 
@@ -266,58 +267,52 @@ class RagAgentService:
                 - data: 具体内容
         """
         try:
-            await self._initialize_agent()
-            await self._apply_snip(session_id)  # Level 1 Snip
+            agent = await self._create_agent_for_question(question)
+            self.agent = agent
+            await self._apply_snip(session_id, agent)  # Level 1 Snip
 
             logger.info(f"[会话 {session_id}] RAG Agent 收到查询（流式）: {question}")
 
             # 构建系统提示：基础 prompt + 最新长期记忆
             memory_ctx = load_memory_context()
             if memory_ctx:
-                system_content = (
-                    f"{self.system_prompt}\n\n"
-                    f"## 长期记忆参考\n\n"
-                    f"{memory_ctx}"
-                )
+                system_content = f"{self.system_prompt}\n\n" f"## 长期记忆参考\n\n" f"{memory_ctx}"
             else:
                 system_content = self.system_prompt
 
             # 构建消息列表（系统提示 + 用户问题）
-            messages = [
-                SystemMessage(content=system_content),
-                HumanMessage(content=question)
-            ]
+            messages = [SystemMessage(content=system_content), HumanMessage(content=question)]
 
             # 构建 Agent 输入
             agent_input = {"messages": messages}
 
             # 配置 thread_id（用于会话持久化）
-            config_dict = {
-                "configurable": {
-                    "thread_id": session_id
-                }
-            }
+            config_dict = {"configurable": {"thread_id": session_id}}
 
-            async for token, metadata in self.agent.astream(
+            async for token, metadata in agent.astream(
                 input=agent_input,
                 config=config_dict,
                 stream_mode="messages",
             ):
-                node_name = metadata.get('langgraph_node', 'unknown') if isinstance(metadata, dict) else 'unknown'
+                node_name = (
+                    metadata.get("langgraph_node", "unknown")
+                    if isinstance(metadata, dict)
+                    else "unknown"
+                )
                 message_type = type(token).__name__
 
                 if message_type in ("AIMessage", "AIMessageChunk"):
-                    content_blocks = getattr(token, 'content_blocks', None)
+                    content_blocks = getattr(token, "content_blocks", None)
 
                     if content_blocks and isinstance(content_blocks, list):
                         for block in content_blocks:
-                            if isinstance(block, dict) and block.get('type') == 'text':
-                                text_content = block.get('text', '')
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text_content = block.get("text", "")
                                 if text_content:
                                     yield {
                                         "type": "content",
                                         "data": text_content,
-                                        "node": node_name
+                                        "node": node_name,
                                     }
 
             logger.info(f"[会话 {session_id}] RAG Agent 查询完成（流式）")
@@ -326,10 +321,7 @@ class RagAgentService:
         except Exception as e:
             detail = _unwrap_exception(e)
             logger.error(f"[会话 {session_id}] RAG Agent 查询失败（流式）: {detail}")
-            yield {
-                "type": "error",
-                "data": detail
-            }
+            yield {"type": "error", "data": detail}
             raise
 
     def get_session_history(self, session_id: str) -> list:
@@ -345,54 +337,49 @@ class RagAgentService:
         try:
             # 使用 checkpointer 的 get 方法获取最新的检查点
             config = {"configurable": {"thread_id": session_id}}
-            
+
             # 获取该 thread 的最新检查点
             checkpoint_tuple = self.checkpointer.get(config)
-            
+
             if not checkpoint_tuple:
                 logger.info(f"获取会话历史: {session_id}, 消息数量: 0")
                 return []
-            
+
             # checkpoint_tuple 可能是命名元组或普通元组，安全地提取 checkpoint
             # 通常第一个元素是 checkpoint 数据
-            if hasattr(checkpoint_tuple, 'checkpoint'):
+            if hasattr(checkpoint_tuple, "checkpoint"):
                 checkpoint_data = checkpoint_tuple.checkpoint  # type: ignore
             else:
                 # 如果是普通元组，第一个元素是 checkpoint
                 checkpoint_data = checkpoint_tuple[0] if checkpoint_tuple else {}
-            
+
             # 从检查点中提取消息
             messages = checkpoint_data.get("channel_values", {}).get("messages", [])
-            
+
             # 转换为前端需要的格式
             history = []
             for msg in messages:
                 # 跳过系统消息
                 if isinstance(msg, SystemMessage):
                     continue
-                    
+
                 role = "user" if isinstance(msg, HumanMessage) else "assistant"
-                content = msg.content if hasattr(msg, 'content') else str(msg)
-                
+                content = msg.content if hasattr(msg, "content") else str(msg)
+
                 # 提取时间戳（如果有的话）
-                timestamp = getattr(msg, 'timestamp', None)
+                timestamp = getattr(msg, "timestamp", None)
                 if timestamp:
-                    history.append({
-                        "role": role,
-                        "content": content,
-                        "timestamp": timestamp
-                    })
+                    history.append({"role": role, "content": content, "timestamp": timestamp})
                 else:
                     from datetime import datetime
-                    history.append({
-                        "role": role,
-                        "content": content,
-                        "timestamp": datetime.now().isoformat()
-                    })
-            
+
+                    history.append(
+                        {"role": role, "content": content, "timestamp": datetime.now().isoformat()}
+                    )
+
             logger.info(f"获取会话历史: {session_id}, 消息数量: {len(history)}")
             return history
-            
+
         except Exception as e:
             logger.error(f"获取会话历史失败: {session_id}, 错误: {e}")
             return []
@@ -410,10 +397,10 @@ class RagAgentService:
         try:
             # 使用 checkpointer 的 delete_thread 方法删除该 thread 的所有检查点
             self.checkpointer.delete_thread(session_id)
-            
+
             logger.info(f"已清除会话历史: {session_id}")
             return True
-            
+
         except Exception as e:
             logger.error(f"清空会话历史失败: {session_id}, 错误: {e}")
             return False

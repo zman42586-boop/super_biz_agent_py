@@ -29,14 +29,16 @@ def retrieve_knowledge(
 
     Returns:
         Tuple[str, List[Document]]: (格式化的上下文文本, 原始文档列表)
+
+    Example:
+        执行诊断步骤“检索 MATLAB 内存不足的历史案例”时，调用：
+        retrieve_knowledge(query="MATLAB 内存不足历史案例", mode="diagnostic")
     """
     try:
         logger.info(f"知识检索工具被调用: query='{query}'")
 
         # 从向量存储中检索相关文档
-        outcome = vector_store_manager.search_with_diagnostics(
-            query, k=config.rag_top_k
-        )
+        outcome = vector_store_manager.search_with_diagnostics(query, k=config.rag_top_k)
         docs = outcome.documents
 
         if not docs:

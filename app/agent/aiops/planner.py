@@ -16,14 +16,15 @@ from app.core.llm_factory import llm_factory
 from app.harness.config import harness_settings
 from app.memory import load_memory_context
 from app.tools import get_current_time, retrieve_knowledge, search_log
+from app.tools.catalog import format_tool_catalog
 from app.utils.token_meter import log_token_budget
 
 from .state import PlanExecuteState
-from .utils import format_tools_description
 
 
 class Plan(BaseModel):
     """计划的输出格式"""
+
     steps: list[str] = Field(
         description="完成任务所需的不同步骤。这些步骤应该按顺序执行，每一步都建立在前一步的基础上。"
     )
@@ -113,9 +114,7 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
         try:
             # retrieve_knowledge 使用 response_format="content_and_artifact"
             # ainvoke() 只返回 content（字符串），不是元组
-            context_str = await retrieve_knowledge.ainvoke(
-                {"query": input_text, "mode": "plan"}
-            )
+            context_str = await retrieve_knowledge.ainvoke({"query": input_text, "mode": "plan"})
             if context_str and context_str.strip():
                 experience_docs = context_str
                 logger.info(f"找到相关经验文档，长度: {len(experience_docs)}")
@@ -143,8 +142,8 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
         all_tools = local_tools + mcp_tools
         logger.info(f"可用工具数量: 本地 {len(local_tools)} + MCP {len(mcp_tools)}")
 
-        # 格式化工具描述
-        tools_description = format_tools_description(all_tools)
+        # 渐进式披露：Planner 只看到领域、名称和短摘要，不注入参数 Schema/长描述。
+        tools_description = format_tool_catalog(all_tools)
 
         # 步骤2.5: 从 .claude/skills/*.md 加载 Skill 描述（Claude Code 风格）
         skills_description = load_skills_description()
@@ -185,13 +184,15 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
         )
 
         # 调用 LLM 生成计划
-        plan_result = await planner_chain.ainvoke({
-            "messages": [("user", input_text)],
-            "tools_description": tools_description,
-            "skills_description": skills_description,
-            "memory_context": memory_context,
-            "experience_context": experience_context,
-        })
+        plan_result = await planner_chain.ainvoke(
+            {
+                "messages": [("user", input_text)],
+                "tools_description": tools_description,
+                "skills_description": skills_description,
+                "memory_context": memory_context,
+                "experience_context": experience_context,
+            }
+        )
 
         # 提取步骤列表
         if isinstance(plan_result, Plan):
@@ -216,10 +217,4 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
     except Exception as e:
         logger.error(f"生成计划失败: {e}", exc_info=True)
         # 返回一个默认计划
-        return {
-            "plan": [
-                "收集相关信息",
-                "分析数据",
-                "生成报告"
-            ]
-        }
+        return {"plan": ["收集相关信息", "分析数据", "生成报告"]}

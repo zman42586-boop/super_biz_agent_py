@@ -15,30 +15,30 @@ from app.agent.mcp_client import get_mcp_tools_with_circuit_breaker
 from app.core.llm_factory import llm_factory
 from app.harness.config import harness_settings
 from app.tools import get_current_time, retrieve_knowledge
+from app.tools.catalog import format_tool_catalog
 from app.utils.context_compaction import collapse_past_steps, format_execution_history
 from app.utils.token_meter import log_token_budget
 
 from .state import PlanExecuteState
-from .utils import format_tools_description
 
 
 class Response(BaseModel):
     """最终响应的格式"""
+
     response: str = Field(description="对用户的最终响应")
 
 
 class Act(BaseModel):
     """重新规划的输出格式"""
-    action: str = Field(
-        description="""下一步的行动，必须是以下三种之一：
+
+    action: str = Field(description="""下一步的行动，必须是以下三种之一：
         - 'continue': 当前计划合理，继续执行下一个步骤
         - 'replan': 当前计划需要调整，提供新的步骤列表
-        - 'respond': 计划已完成且信息充足，生成最终响应"""
-    )
+        - 'respond': 计划已完成且信息充足，生成最终响应""")
     # action 为 'replan' 时，新的步骤列表（会替换当前剩余计划）
     new_steps: list[str] = Field(
         default_factory=list,
-        description="新的步骤列表（如果 action 是 'replan'，这些步骤会替换剩余计划）"
+        description="新的步骤列表（如果 action 是 'replan'，这些步骤会替换剩余计划）",
     )
 
 
@@ -138,8 +138,7 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
     max_steps = harness_settings.max_steps
     if len(past_steps) >= max_steps:
         logger.warning(
-            f"已执行 {len(past_steps)} 个步骤，超过最大限制 {max_steps}，"
-            "强制生成最终响应"
+            f"已执行 {len(past_steps)} 个步骤，超过最大限制 {max_steps}，" "强制生成最终响应"
         )
         llm = llm_factory.create_chat_model(
             temperature=0,
@@ -155,10 +154,7 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
     # 获取可用工具列表
     try:
         # 获取本地工具
-        local_tools = [
-            get_current_time,
-            retrieve_knowledge
-        ]
+        local_tools = [get_current_time, retrieve_knowledge]
 
         # 获取 MCP 工具
         mcp_tools = await get_mcp_tools_with_circuit_breaker()
@@ -167,8 +163,8 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
         all_tools = local_tools + mcp_tools
         logger.info(f"可用工具数量: 本地 {len(local_tools)} + MCP {len(mcp_tools)}")
 
-        # 格式化工具描述
-        tools_description = format_tools_description(all_tools)
+        # 渐进式披露：Replanner 只看到紧凑目录，不看到完整参数 Schema。
+        tools_description = format_tool_catalog(all_tools)
     except Exception as e:
         logger.warning(f"获取工具列表失败: {e}")
         tools_description = "无法获取工具列表"
@@ -188,14 +184,19 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
     if plan:
         logger.info("还有剩余计划，评估下一步行动")
 
-        replanner_chain = replanner_prompt | llm.with_structured_output(Act, method="function_calling")
+        replanner_chain = replanner_prompt | llm.with_structured_output(
+            Act, method="function_calling"
+        )
 
         try:
             messages = [
                 ("user", f"原始任务: {input_text}"),
                 ("user", f"已执行的步骤:\n{steps_summary}"),
                 ("user", f"剩余计划: {', '.join(plan)}"),
-                ("user", f"⚠️ 重要提示：已执行 {len(past_steps)} 个步骤，请优先考虑是否信息已足够生成响应（respond）")
+                (
+                    "user",
+                    f"⚠️ 重要提示：已执行 {len(past_steps)} 个步骤，请优先考虑是否信息已足够生成响应（respond）",
+                ),
             ]
 
             log_token_budget(
@@ -208,10 +209,9 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
                 },
             )
 
-            act = await replanner_chain.ainvoke({
-                "messages": messages,
-                "tools_description": tools_description
-            })
+            act = await replanner_chain.ainvoke(
+                {"messages": messages, "tools_description": tools_description}
+            )
 
             # 处理返回结果
             if isinstance(act, Act):
@@ -237,7 +237,7 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
                         f"新步骤数 {len(new_steps)} > 剩余步骤数 {len(plan)}，"
                         f"强制截断为 {len(plan)} 个步骤"
                     )
-                    new_steps = new_steps[:len(plan)]
+                    new_steps = new_steps[: len(plan)]
 
                 # ⚠️ 二次检查：如果已执行步骤 >= 5，禁止 replan
                 if len(past_steps) >= 5:
@@ -285,7 +285,7 @@ async def _generate_response(state: PlanExecuteState, llm: ChatOpenAI) -> dict[s
         messages = [
             ("user", f"原始任务: {input_text}"),
             ("user", f"执行历史:\n{execution_history}"),
-            ("user", "请基于以上信息生成全面的最终响应")
+            ("user", "请基于以上信息生成全面的最终响应"),
         ]
 
         log_token_budget(

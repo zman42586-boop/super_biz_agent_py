@@ -13,6 +13,7 @@ from typing import Any
 from app.harness.config import harness_settings
 from app.harness.loop_guard import LoopGuard, loop_guard
 from app.harness.runtime import get_run_context
+from app.tools.result import normalize_tool_result
 
 
 class ToolExecutionError(RuntimeError):
@@ -38,6 +39,7 @@ class ToolExecutionResult:
     latency_ms: int
     cached: bool = False
     artifact_path: str | None = None
+    structured_content: dict[str, Any] | None = None
 
 
 def _safe_json(value: Any) -> Any:
@@ -54,6 +56,23 @@ def _result_text(result: Any) -> str:
     if isinstance(result, tuple) and result:
         return _result_text(result[0])
     return json.dumps(_safe_json(result), ensure_ascii=False, indent=2)
+
+
+def _prepared_result(tool_name: str, result: Any) -> tuple[str, dict[str, Any] | None]:
+    """生成提供给模型的文本，并尽可能保留结构化 ToolResult。"""
+    content_value = result
+    if hasattr(content_value, "content"):
+        content_value = content_value.content
+    if isinstance(content_value, tuple) and content_value:
+        # LangChain content_and_artifact 工具的第一个元素是给模型阅读的内容；
+        # artifact 由工具自身管理，保持原有兼容行为。
+        content_value = content_value[0]
+
+    safe_value = _safe_json(content_value)
+    structured = normalize_tool_result(tool_name, safe_value)
+    if structured is None:
+        return _result_text(result), None
+    return json.dumps(structured, ensure_ascii=False, indent=2), structured
 
 
 def _validate_arguments(tool: Any, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -157,6 +176,7 @@ class ToolGateway:
                     latency_ms=int(call_row.get("latency_ms") or 0),
                     cached=True,
                     artifact_path=call_row.get("result_artifact_path"),
+                    structured_content=result.get("structured_content"),
                 )
 
         attempts = max(1, policy.max_retries + 1)
@@ -170,19 +190,24 @@ class ToolGateway:
                 raw_result = await asyncio.wait_for(
                     self._invoke(tool, validated), timeout=policy.timeout_seconds
                 )
-                content, artifact_path = await asyncio.to_thread(
+                result_text, structured_content = _prepared_result(tool_name, raw_result)
+                content, artifact_path, structured_content = await asyncio.to_thread(
                     self._limit_result,
                     context.run_id if context else "adhoc",
                     idempotency_key,
-                    _result_text(raw_result),
+                    result_text,
                     policy.max_output_chars,
+                    structured_content,
                 )
                 latency_ms = int((time.perf_counter() - total_started) * 1000)
                 if context is not None and call_id is not None:
                     await asyncio.to_thread(
                         context.repository.complete_tool_call,
                         call_id,
-                        result={"content": content},
+                        result={
+                            "content": content,
+                            "structured_content": structured_content,
+                        },
                         latency_ms=latency_ms,
                         artifact_path=artifact_path,
                     )
@@ -192,6 +217,7 @@ class ToolGateway:
                     attempts=attempt,
                     latency_ms=latency_ms,
                     artifact_path=artifact_path,
+                    structured_content=structured_content,
                 )
             except BaseException as exc:
                 if isinstance(exc, asyncio.CancelledError):
@@ -229,6 +255,7 @@ class ToolGateway:
                             latency_ms=int(call_row.get("latency_ms") or 0),
                             cached=True,
                             artifact_path=call_row.get("result_artifact_path"),
+                            structured_content=result.get("structured_content"),
                         )
 
         raise last_error or ToolExecutionError("TOOL_EXECUTION_FAILED", "Unknown tool error")
@@ -244,9 +271,7 @@ class ToolGateway:
         return await asyncio.to_thread(tool, **arguments)
 
     @staticmethod
-    def _idempotency_key(
-        run_id: str, step_index: int, tool_name: str, arguments: dict
-    ) -> str:
+    def _idempotency_key(run_id: str, step_index: int, tool_name: str, arguments: dict) -> str:
         body = json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
         digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:24]
         return f"{run_id}:{step_index}:{tool_name}:{digest}"[:128]
@@ -257,17 +282,31 @@ class ToolGateway:
         idempotency_key: str,
         content: str,
         max_chars: int,
-    ) -> tuple[str, str | None]:
+        structured_content: dict[str, Any] | None = None,
+    ) -> tuple[str, str | None, dict[str, Any] | None]:
         if len(content) <= max_chars:
-            return content, None
+            return content, None, structured_content
         artifact_dir = Path("memory") / "artifacts" / run_id
         artifact_dir.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:16]
         path = artifact_dir / f"tool_{digest}.txt"
         path.write_text(content, encoding="utf-8")
+
+        if structured_content is not None:
+            compact = {
+                key: value for key, value in structured_content.items() if key != "raw_result"
+            }
+            compact["raw_ref"] = path.as_posix()
+            compact["truncated"] = True
+            return (
+                json.dumps(compact, ensure_ascii=False, indent=2),
+                path.as_posix(),
+                compact,
+            )
+
         preview = content[:max_chars]
         preview += f"\n\n[工具结果已截断，完整内容: {path.as_posix()}]"
-        return preview, path.as_posix()
+        return preview, path.as_posix(), None
 
 
 tool_gateway = ToolGateway()

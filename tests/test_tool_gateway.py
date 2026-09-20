@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from pydantic import BaseModel
@@ -58,7 +59,11 @@ async def test_gateway_validates_and_reuses_idempotent_result(tmp_path) -> None:
         )
 
     assert "6" in first.content
+    assert first.structured_content is not None
+    assert first.structured_content["key_facts"]["value"] == 6
+    assert json.loads(first.content)["schema"] == "tool_result.v1"
     assert second.cached is True
+    assert second.structured_content == first.structured_content
     assert tool.calls == 1
 
 

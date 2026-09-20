@@ -12,14 +12,18 @@ Level 2 Microcompact 节点
 
 from __future__ import annotations
 
+import json
 import os
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any
 
 import aiofiles
 from loguru import logger
 
+from app.tools.result import is_tool_result
 from app.utils.token_meter import count_tokens, log_compression
+
 from .state import PlanExecuteState
 
 # 超过此 token 估算值时触发 Microcompact（演示模式：100 tokens ≈ 400 字符，几乎任何工具结果都会触发）
@@ -108,7 +112,7 @@ async def _save_artifact(session_id: str, step: str, content: str) -> str:
     return filepath
 
 
-async def microcompact(state: PlanExecuteState, config: dict | None = None) -> Dict[str, Any]:
+async def microcompact(state: PlanExecuteState, config: dict | None = None) -> dict[str, Any]:
     """Microcompact 节点：压缩超大工具结果，落盘到 artifacts/。"""
     past_steps = list(state.get("past_steps", []))
 
@@ -116,7 +120,12 @@ async def microcompact(state: PlanExecuteState, config: dict | None = None) -> D
         return {}
 
     last_step, last_result = past_steps[-1]
-    before_tokens = count_tokens(str(last_result))
+    serialized_result = (
+        json.dumps(last_result, ensure_ascii=False, indent=2, default=str)
+        if isinstance(last_result, Mapping)
+        else str(last_result)
+    )
+    before_tokens = count_tokens(serialized_result)
 
     if before_tokens <= _MICROCOMPACT_TOKEN_THRESHOLD:
         return {}
@@ -126,13 +135,53 @@ async def microcompact(state: PlanExecuteState, config: dict | None = None) -> D
     if config and isinstance(config, dict):
         session_id = config.get("configurable", {}).get("thread_id", "default")
 
+    structured_result: dict[str, Any] | None = None
+    if is_tool_result(last_result):
+        structured_result = dict(last_result)
+    elif isinstance(last_result, str):
+        try:
+            parsed = json.loads(last_result)
+        except (TypeError, ValueError):
+            parsed = None
+        if is_tool_result(parsed):
+            structured_result = dict(parsed)
+
+    # 新协议：Tool 已经声明 summary/key_facts，Microcompact 不再猜业务关键词。
+    if structured_result is not None:
+        raw_result = structured_result.get("raw_result", structured_result)
+        raw_text = (
+            raw_result
+            if isinstance(raw_result, str)
+            else json.dumps(raw_result, ensure_ascii=False, indent=2, default=str)
+        )
+        artifact_path = structured_result.get("raw_ref")
+        if not artifact_path:
+            try:
+                artifact_path = await _save_artifact(session_id, last_step, raw_text)
+            except Exception as e:
+                logger.warning(f"[Microcompact] 写入 artifact 失败: {e}")
+                # 原文没有可靠落盘时不删除 raw_result，避免压缩造成不可恢复的数据丢失。
+                return {}
+
+        compact_result = {
+            key: value for key, value in structured_result.items() if key != "raw_result"
+        }
+        compact_result["raw_ref"] = artifact_path
+        compact_result["truncated"] = True
+
+        after_tokens = count_tokens(json.dumps(compact_result, ensure_ascii=False, default=str))
+        log_compression("Microcompact", before_tokens, after_tokens)
+        updated_past_steps = past_steps[:-1] + [(last_step, compact_result)]
+        return {"past_steps": updated_past_steps}
+
+    # 旧工具兼容：纯文本仍使用“头 + 错误行 + 尾”的确定性兜底规则。
     try:
-        artifact_path = await _save_artifact(session_id, last_step, str(last_result))
+        artifact_path = await _save_artifact(session_id, last_step, serialized_result)
     except Exception as e:
         logger.warning(f"[Microcompact] 写入 artifact 失败: {e}")
         artifact_path = "(写入失败)"
 
-    raw_text = str(last_result)
+    raw_text = serialized_result
     preview = _smart_preview(raw_text)
     compact_result = (
         f"[Microcompact] 原始结果已压缩落盘 → {artifact_path}\n"

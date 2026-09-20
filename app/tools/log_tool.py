@@ -11,6 +11,8 @@ from typing import Any
 from langchain_core.tools import tool
 from loguru import logger
 
+from app.tools.result import make_tool_result
+
 _LOGS_DIR = os.path.join(os.getcwd(), "logs")
 _LOG_LINE_RE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
@@ -33,6 +35,10 @@ def search_log(query: str = "", minutes: int = 60, limit: int = 100) -> dict[str
 
     Returns:
         dict: 包含 logs、total、files_scanned、time_range、message 等字段。
+
+    Example:
+        用户要求“检查最近 30 分钟 MATLAB 的 ERROR 日志”时，调用：
+        search_log(query="MATLAB ERROR", minutes=30, limit=100)
     """
     logger.info(f"本地日志检索工具被调用: query='{query}', minutes={minutes}, limit={limit}")
 
@@ -42,13 +48,23 @@ def search_log(query: str = "", minutes: int = 60, limit: int = 100) -> dict[str
 
     log_files = sorted(glob.glob(os.path.join(_LOGS_DIR, "app_*.log")))
     if not log_files:
-        return {
+        raw_result = {
             "query": query,
             "total": 0,
             "logs": [],
             "files_scanned": 0,
             "error": f"未找到日志文件: {os.path.join(_LOGS_DIR, 'app_*.log')}",
         }
+        return make_tool_result(
+            status="error",
+            summary=raw_result["error"],
+            key_facts={
+                "query": query,
+                "total": 0,
+                "files_scanned": 0,
+            },
+            raw_result=raw_result,
+        )
 
     keywords = [kw.strip().lower() for kw in query.split() if kw.strip()]
     logs: list[dict[str, str]] = []
@@ -98,7 +114,7 @@ def search_log(query: str = "", minutes: int = 60, limit: int = 100) -> dict[str
         if len(logs) >= limit:
             break
 
-    return {
+    raw_result = {
         "query": query,
         "time_range": {
             "start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
@@ -111,3 +127,14 @@ def search_log(query: str = "", minutes: int = 60, limit: int = 100) -> dict[str
         "files_scanned": files_scanned,
         "message": f"找到 {len(logs)} 条匹配日志" if logs else "未找到匹配日志",
     }
+    return make_tool_result(
+        summary=raw_result["message"],
+        key_facts={
+            "query": query,
+            "time_range": raw_result["time_range"],
+            "limit": limit,
+            "total": len(logs),
+            "files_scanned": files_scanned,
+        },
+        raw_result=raw_result,
+    )

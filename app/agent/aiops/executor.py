@@ -11,12 +11,14 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from loguru import logger
 
 from app.agent.mcp_client import get_mcp_tools_with_circuit_breaker
+from app.agent.tool_selector import select_tools_for_task
 from app.claude_skills import list_skill_ids
 from app.core.llm_factory import llm_factory
 from app.harness.loop_guard import loop_guard
 from app.harness.runtime import get_run_context
 from app.harness.tool_gateway import ToolExecutionError, tool_gateway
 from app.tools import get_current_time, retrieve_knowledge, search_log
+from app.tools.result import make_tool_result
 
 from .state import PlanExecuteState
 
@@ -83,7 +85,7 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
         )
         if step_row["status"] == "succeeded":
             stored = step_row.get("output") or {}
-            stored_result = str(stored.get("content", ""))
+            stored_result = stored.get("content", "")
             return {
                 "plan": plan[1:],
                 "past_steps": current_past_steps + [(task, stored_result)],
@@ -105,12 +107,15 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
             mcp_tools = []
         logger.info(f"可用工具数量: 本地 {len(local_tools)} + MCP {len(mcp_tools)}")
 
-        # 合并所有工具
+        # 合并工具注册表；此时完整 Schema 只保留在应用内，不直接进入模型上下文。
         all_tools = local_tools + mcp_tools
+
+        # 第一阶段只用 domain + name + summary 路由；第二阶段只挂载候选工具完整 Schema。
+        selected_tools = await select_tools_for_task(task, all_tools)
 
         # 创建 LLM（绑定工具）
         llm = llm_factory.create_chat_model(temperature=0)
-        llm_with_tools = llm.bind_tools(all_tools)
+        llm_with_tools = llm.bind_tools(selected_tools) if selected_tools else llm
 
         # 构建消息（只包含当前步骤，避免原始任务干扰）
         messages = [
@@ -128,7 +133,7 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 - 严格区分日志事实、知识库证据和分析推断；证据不足时明确写“原因未确定”
 - 执行结果要清晰、准确
 - 专注于当前步骤，不要考虑其他任务"""),
-            HumanMessage(content=f"请执行以下任务: {task}")
+            HumanMessage(content=f"请执行以下任务: {task}"),
         ]
 
         # 第一步：LLM 决定是否调用工具
@@ -142,19 +147,23 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
             messages.append(llm_response)
             tools_by_name = {
                 str(getattr(tool, "name", getattr(tool, "__name__", ""))): tool
-                for tool in all_tools
+                for tool in selected_tools
             }
             tool_messages = []
+            tool_facts: list[dict[str, Any]] = []
+            raw_tool_results: list[dict[str, Any]] = []
             for tool_call in llm_response.tool_calls:
                 tool_name = str(tool_call.get("name", ""))
                 tool_call_id = str(tool_call.get("id", tool_name))
                 arguments = tool_call.get("args") or {}
                 tool = tools_by_name.get(tool_name)
                 if tool is None:
-                    content = (
-                        f'{{"ok": false, "error_code": "TOOL_NOT_FOUND", '
-                        f'"message": "未知工具: {tool_name}"}}'
+                    structured_content = make_tool_result(
+                        status="error",
+                        summary=f"未知工具: {tool_name}",
+                        key_facts={"error_code": "TOOL_NOT_FOUND"},
                     )
+                    content = json.dumps(structured_content, ensure_ascii=False)
                 else:
                     try:
                         execution = await tool_gateway.execute(
@@ -164,11 +173,35 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
                             step_index=step_index,
                         )
                         content = execution.content
+                        structured_content = execution.structured_content
                     except ToolExecutionError as tool_error:
-                        content = (
-                            f'{{"ok": false, "error_code": "{tool_error.code}", '
-                            f'"message": {json.dumps(str(tool_error), ensure_ascii=False)}}}'
+                        structured_content = make_tool_result(
+                            status="error",
+                            summary=str(tool_error),
+                            key_facts={"error_code": tool_error.code},
                         )
+                        content = json.dumps(structured_content, ensure_ascii=False)
+
+                if structured_content is not None:
+                    tool_fact = {
+                        key: value
+                        for key, value in structured_content.items()
+                        if key != "raw_result"
+                    }
+                else:
+                    tool_fact = {
+                        "status": "success",
+                        "summary": f"{tool_name} 返回非结构化结果",
+                        "key_facts": {},
+                    }
+                tool_fact["tool_name"] = tool_name
+                tool_facts.append(tool_fact)
+                raw_tool_results.append(
+                    {
+                        "tool_name": tool_name,
+                        "content": content,
+                    }
+                )
                 tool_messages.append(
                     ToolMessage(
                         content=content,
@@ -180,26 +213,45 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
             # 第三步：将工具结果返回给 LLM 生成最终答案
             messages.extend(tool_messages)
             final_response = await llm_with_tools.ainvoke(messages)
-            result = final_response.content if hasattr(final_response, 'content') else str(final_response)
+            result = (
+                final_response.content
+                if hasattr(final_response, "content")
+                else str(final_response)
+            )
         else:
             # 没有工具调用，直接使用 LLM 的输出
             logger.info("LLM 未调用工具，直接返回结果")
-            result = llm_response.content if hasattr(llm_response, 'content') else str(llm_response)
+            result = llm_response.content if hasattr(llm_response, "content") else str(llm_response)
 
         result = result if isinstance(result, str) else str(result)
-        logger.info(f"步骤执行完成，结果长度: {len(result)}")
+        result_for_state: Any = result
+        if hasattr(llm_response, "tool_calls") and llm_response.tool_calls:
+            statuses = [str(item.get("status", "success")) for item in tool_facts]
+            step_status = (
+                "error"
+                if statuses and all(status == "error" for status in statuses)
+                else "partial" if any(status == "error" for status in statuses) else "success"
+            )
+            result_for_state = make_tool_result(
+                status=step_status,
+                summary=result,
+                key_facts={"tools": tool_facts},
+                raw_result=raw_tool_results,
+            )
+
+        logger.info(f"步骤执行完成，结果长度: {len(str(result_for_state))}")
 
         if run_context is not None and step_row is not None:
             await asyncio.to_thread(
                 run_context.repository.complete_step,
                 int(step_row["id"]),
-                output=result,
+                output=result_for_state,
             )
 
         # past_steps 使用全量替换 reducer，必须返回完整列表
         return {
             "plan": plan[1:],
-            "past_steps": current_past_steps + [(task, result)],
+            "past_steps": current_past_steps + [(task, result_for_state)],
         }
 
     except Exception as e:

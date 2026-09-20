@@ -66,20 +66,19 @@
 
 ## 四、Harness、循环控制与可靠性
 
-1. 什么是 Agent Harness？为什么把裸 `asyncio.create_task()` 改造成 Harness Run？Run、Step、ToolCall、Event 分别解决什么问题？
-2. `app/harness/` 中 models、repository、worker、runtime、tool_gateway、loop_guard、config 各自负责什么？它们如何串起来？
-3. Worker 如何认领 Run、续租和完成任务？为什么需要 lease？两个 Worker 如何避免重复认领？Worker 崩溃后如何恢复？
-4. Agent 为什么会死循环或空转？LoopGuard 如何用最大步骤、最大工具次数、重复步骤、重复调用和无进展判定形成多道闸？【多家公司高频】
-5. `max_steps=8`、`max_tool_calls=20`、重复/无进展阈值为 2、递归上限 32 是怎么定的？过严误杀和过松失控如何通过指标校准？
-6. Replanner 中“已执行 ≥5 步禁止 replan、新计划不得超过剩余步数”解决什么问题？它与 LoopGuard 有什么分工？
-7. Tool Gateway 如何做参数校验、10 秒超时、有限重试、退避、降级和结果记录？哪些错误可重试，哪些不能？
-8. 幂等键解决什么问题？告警 ingest、工具调用和 Run 重放分别如何设计幂等边界？为什么 exactly-once 不能只靠本地幂等表保证？
-9. MCP Server 挂掉、返回非法 JSON 或超时时，诊断是否整体不可用？怎样保留部分结果并明确降级？
-10. Run 总超时 300 秒、租约 30 秒且约每 10 秒续租的关系是什么？旧 Worker 恢复后如何避免继续写入，为什么还需要 fencing token？
-11. 当前 Harness 持久化与 LangGraph checkpoint 各保存什么？进程或 Pod 重启后哪些能恢复、哪些不能？升级到 Redis/Postgres saver 怎么做？【字节二面 / 淘天】
-12. 多用户或告警风暴到来时，怎样做队列、背压、并发上限、租户隔离、分布式限流与熔断？单机内存计数为什么会失效？【小红书 / 美团】
-13. 如何在不依赖调 Prompt 的情况下提高 Agent 确定性：状态机、Schema、预算、权限、幂等、验证器、回退和人工接管分别放在哪一层？【字节】
-14. 换一个底层大模型时，哪些层应该保持不变？如何通过模型适配层和回归评测避免行为悄悄退化？【字节】
+1. `app/harness/` 中 models、repository、worker、runtime、tool_gateway、loop_guard、config 各自负责什么？它们如何串起来？
+2. Worker 如何认领 Run、续租和完成任务？为什么需要 lease？两个 Worker 如何避免重复认领？Worker 崩溃后如何恢复？
+3. Agent 为什么会死循环或空转？LoopGuard 如何用最大步骤、最大工具次数、重复步骤、重复调用和无进展判定形成多道闸？【多家公司高频】
+4. `max_steps=8`、`max_tool_calls=20`、重复/无进展阈值为 2、递归上限 32 是怎么定的？过严误杀和过松失控如何通过指标校准？
+5. Replanner 中“已执行 ≥5 步禁止 replan、新计划不得超过剩余步数”解决什么问题？它与 LoopGuard 有什么分工？
+6. Tool Gateway 如何做参数校验、10 秒超时、有限重试、退避、降级和结果记录？哪些错误可重试，哪些不能？
+7. 幂等键解决什么问题？告警 ingest、工具调用和 Run 重放分别如何设计幂等边界？为什么 exactly-once 不能只靠本地幂等表保证？
+8. MCP Server 挂掉、返回非法 JSON 或超时时，诊断是否整体不可用？怎样保留部分结果并明确降级？
+9. Run 总超时 300 秒、租约 30 秒且约每 10 秒续租的关系是什么？旧 Worker 恢复后如何避免继续写入，为什么还需要 fencing token？
+10. 当前 Harness 持久化与 LangGraph checkpoint 各保存什么？进程或 Pod 重启后哪些能恢复、哪些不能？升级到 Redis/Postgres saver 怎么做？【字节二面 / 淘天】
+11. 多用户或告警风暴到来时，怎样做队列、背压、并发上限、租户隔离、分布式限流与熔断？单机内存计数为什么会失效？【小红书 / 美团】
+12. 如何在不依赖调 Prompt 的情况下提高 Agent 确定性：状态机、Schema、预算、权限、幂等、验证器、回退和人工接管分别放在哪一层？【字节】
+13. 换一个底层大模型时，哪些层应该保持不变？如何通过模型适配层和回归评测避免行为悄悄退化？【字节】
 
 ## 五、Tool Calling、MCP 与 Skill
 
