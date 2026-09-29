@@ -8,7 +8,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sse_starlette.sse import EventSourceResponse
 
 from app.harness.repository import TERMINAL_RUN_STATUSES, get_harness_repository
@@ -30,6 +30,15 @@ class RecordEvaluationRequest(BaseModel):
     passed: bool
     metrics: dict[str, float] = Field(default_factory=dict)
     comment: str | None = Field(default=None, max_length=4000)
+
+    @field_validator("metrics")
+    @classmethod
+    def validate_retrieval_metrics(cls, metrics: dict[str, float]) -> dict[str, float]:
+        """Hit@1 对单个样本只能是 0/1；也兼容批量评价传入 0～1 的均值。"""
+        hit_at_1 = metrics.get("hit_at_1")
+        if hit_at_1 is not None and not 0.0 <= hit_at_1 <= 1.0:
+            raise ValueError("hit_at_1 must be between 0 and 1")
+        return metrics
 
 
 async def _repository_call(method_name: str, *args, **kwargs):

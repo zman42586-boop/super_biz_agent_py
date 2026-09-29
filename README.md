@@ -2,6 +2,8 @@
 
 面向 MATLAB 桌面进程的主动轮询监控与 AIOps 诊断项目。系统持续采集 CPU、内存、温度和高占用进程；当 MATLAB 从“存在”变为“消失”时，查找最新 crash dump，把日志证据与 Milvus 知识库召回结果交给 Agent 分析，并可用独立 Judge 模型离线评估诊断报告。
 
+项目只保留面向告警诊断的 Plan-Execute-Replan 主链路；旧的普通多轮 RAG 聊天接口已经移除。知识库检索仍作为 AIOps Agent 的按需工具使用。
+
 > 当前定位是个人/实验环境的工程原型，不是已经接入生产监控平台的商业系统。评测数据来自 40 条可回答查询和 10 条不可回答查询，不能等同于线上真实故障准确率。
 
 ## 当前能力
@@ -12,7 +14,7 @@
 - 心跳与死前快照：每轮向 FastAPI 上报状态，并在本地保存轻量快照；服务端可检测心跳超时。
 - RAG 诊断：Dense 向量召回 + Milvus BM25 稀疏召回，经 RRF 融合后按置信度决定是否查询改写、重试和交叉编码重排。
 - 证据约束：最终上下文分为“事实、检索证据、推断”；证据不足时明确输出“原因未确定”和需补充的日志。
-- 分层记忆：诊断报告写入 `memory/incidents/`，摘要写入 `memory/MEMORY.md`，后续可重新入库参与召回。
+- 分层记忆：诊断报告先写入 `memory/incidents/` 留档；LLM Judge 评估知识价值，高价值低风险案例自动入库，模糊或高风险案例转人工审核，只有 `approved` 内容能进入 Milvus 和 Planner 上下文。
 - 评测：支持 Recall@5、Precision@5、MRR、nDCG@5、Hit@1、拒答率、重试率、重排率和延迟统计；生成质量由独立 LLM Judge 评分。
 
 ## 真实链路
@@ -73,12 +75,12 @@ BM25 属于召回阶段，不是重排器。它依靠词频、逆文档频率和
 ### 自适应检索
 
 1. 对原查询执行 Dense + BM25 + RRF。
-2. 根据诊断标记命中、词汇覆盖、来源集中度和来源可信度计算置信度。
-3. 低置信度时只做一次规则化查询改写并重试，避免无限循环。
-4. 高置信度直接返回；中等置信度使用 CrossEncoder；重试后仍低且无语义证据时拒绝给出确定根因。
+2. 应用层保留每个 Child 的 Dense 排名与 BM25 排名；同一 Child 同时进入两路 Top 10 才标记为高置信度。
+3. 高置信度唯一 Parent 数量达到最终 Top K 时，直接按 RRF 顺序返回并跳过 CrossEncoder。
+4. 高置信度 Parent 不足时，使用 CrossEncoder 对 RRF 候选池重排，并以最高语义分数校验证据是否充分；没有候选时只做一次规则化查询改写。
 5. 输出检索尝试次数、是否改写、是否重排、证据是否充分，供日志和评测使用。
 
-当前阈值：low=0.35、high=0.55、语义证据阈值=0.55。阈值来自当前小型验证集，只应作为起点。
+当前双路排名窗口为 Top 10；该参数来自当前工程设定，仍需结合中文故障检索集校准。
 
 ## 模型与基础设施
 
@@ -130,6 +132,15 @@ docker compose -f vector-database.yml ps
 
 常用地址：Web/API `http://localhost:9900`，Swagger `http://localhost:9900/docs`，Attu `http://localhost:8000`，Milvus `localhost:19530`。
 
+### 长期记忆审核
+
+诊断报告始终保存为 Incident，但不再默认进入知识库。LLM Judge 会输出知识价值分、模糊标志、风险等级和理由：分数不低于 `MEMORY_AUTO_APPROVE_SCORE` 且低风险、无歧义时自动批准；低于 `MEMORY_REJECT_SCORE` 时拒绝；其余情况进入人工审核。Judge 调用失败时也会安全降级到人工审核。
+
+- `GET /api/memory/reviews?status=pending_review`：查看待审核 Incident。
+- `POST /api/memory/reviews/{incident_name}`：提交 `approved` 或 `rejected` 的人工决定、审核人和备注。
+
+人工批准后系统才会将 Incident 增量写入 Milvus；未批准条目不会被 `MEMORY.md` 加载进 Planner 的 Prompt。
+
 ## 关键配置
 
 完整模板见 `.env.example`。当前核心 RAG 参数也可通过环境变量覆盖：
@@ -141,8 +152,7 @@ RAG_SPARSE_CANDIDATES=20
 RAG_RERANK_CANDIDATES=20
 RAG_RRF_K=60
 RAG_RERANKER_WEIGHT=0.20
-RAG_CONFIDENCE_LOW=0.35
-RAG_CONFIDENCE_HIGH=0.55
+RAG_CONFIDENCE_RANK_WINDOW=10
 RAG_SEMANTIC_EVIDENCE_THRESHOLD=0.55
 CHUNK_MAX_TOKENS=420
 CHUNK_OVERLAP_TOKENS=64

@@ -48,7 +48,7 @@ GET /api/runs/metrics/summary?window_hours=24&kind=alert_diagnosis
 
 - `runs`：状态分布、成功率、Run 延迟 P50/P95、平均 Step/ToolCall、LoopGuard 触发率、恢复率。
 - `tools`：工具成功率、重试率、工具延迟 P50/P95。
-- `quality`：已评分 Run 数、平均质量分和通过率。
+- `quality`：已评分 Run 数、平均质量分、通过率，以及 Hit@1 和参与该指标计算的样本数。
 
 给一个真实 Run 写入人工或自动评分：
 
@@ -64,7 +64,8 @@ Content-Type: application/json
   "metrics": {
     "root_cause_accuracy": 0.9,
     "evidence_quality": 0.8,
-    "actionability": 0.9
+    "actionability": 0.9,
+    "hit_at_1": 1.0
   },
   "comment": "根因和证据正确，处置建议可执行"
 }
@@ -77,6 +78,9 @@ GET /api/runs/{run_id}/evaluations
 ```
 
 评分会写入 MySQL 的 `agent_run_evaluations` 表，并追加 `run_evaluated` 事件。
+单条检索评测的 `hit_at_1` 通常为 `0` 或 `1`；汇总接口返回窗口内所有有效
+`hit_at_1` 的平均值，并用 `hit_at_1_evaluation_count` 标明样本数。没有该指标时返回 `null`，
+避免把“没有评测”误认为命中率为 0。
 
 ## 推荐的优化对比流程
 

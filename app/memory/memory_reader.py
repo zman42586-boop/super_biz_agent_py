@@ -1,6 +1,6 @@
 """MemoryReader — 长期记忆读取器（Hot 层）
 
-供 Planner / RAG Agent 调用，将 Hot 记忆注入到 Prompt 中。
+供 AIOps Planner 调用，将 Hot 记忆注入到 Prompt 中。
 
 读取范围：
   - memory/MEMORY.md  — 最近诊断索引 + 启发式摘要 + 指向 Cold 报告的链接（由 memory_writer 维护）
@@ -9,6 +9,7 @@
   - memory/incidents/  — 完整诊断报告
   - memory/artifacts/  — Microcompact 工具结果落盘
 """
+
 from __future__ import annotations
 
 import os
@@ -20,6 +21,21 @@ _MEMORY_MD = os.path.join(_MEMORY_ROOT, "MEMORY.md")
 
 # 注入 Prompt 的字符上限，防止撑爆上下文窗口
 _DEFAULT_MAX_CHARS = 4000
+
+
+def _approved_memory_only(content: str) -> str:
+    """过滤未审核/已拒绝条目，避免其被 Planner 当成可信长期记忆。"""
+    kept: list[str] = []
+    for line in content.splitlines():
+        if not line.startswith("|"):
+            kept.append(line)
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        # 表头和分隔行保留；旧版四列数据已在历史上直接入库，兼容为 approved。
+        is_data_row = bool(cells and len(cells[0]) >= 16 and cells[0][4:5] == "-")
+        if not is_data_row or len(cells) == 4 or (len(cells) >= 5 and cells[-2] == "approved"):
+            kept.append(line)
+    return "\n".join(kept).strip()
 
 
 def load_memory_context(max_chars: int = _DEFAULT_MAX_CHARS) -> str:
@@ -44,7 +60,8 @@ def load_memory_context(max_chars: int = _DEFAULT_MAX_CHARS) -> str:
     if not content:
         return ""
 
-    combined = f"### 历史诊断索引 (MEMORY.md)\n\n{content}"
+    approved_content = _approved_memory_only(content)
+    combined = f"### 已审核历史诊断索引 (MEMORY.md)\n\n{approved_content}"
 
     if len(combined) > max_chars:
         combined = combined[:max_chars] + "\n\n...(长期记忆已截断)"

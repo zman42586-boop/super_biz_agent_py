@@ -14,17 +14,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Literal
 
 import aiofiles
 from loguru import logger
+
+from app.memory.value_judge import decide_review_status, evaluate_memory_value
 
 _MEMORY_ROOT = "memory"
 _INCIDENTS_DIR = os.path.join(_MEMORY_ROOT, "incidents")
 _ARTIFACTS_DIR = os.path.join(_MEMORY_ROOT, "artifacts")
 _MEMORY_MD = os.path.join(_MEMORY_ROOT, "MEMORY.md")
+_REVIEW_SUFFIX = ".review.json"
 
 # MEMORY.md 中保留的最近 Incident 条数
 _MAX_RECENT_INCIDENTS = 20
@@ -82,7 +88,7 @@ class MemoryWriter:
         task_description: str,
         report: str,
     ) -> str:
-        """将一次诊断结果写入 incidents/ 并更新 MEMORY.md。
+        """留档诊断结果，经 LLM 价值判断后决定入库或转人工审核。
 
         Args:
             session_id:       AIOps 会话 ID（用作文件名）
@@ -116,15 +122,34 @@ class MemoryWriter:
             logger.error(f"[MemoryWriter] 写入 incident 失败: {e}")
             return ""
 
+        assessment = await evaluate_memory_value(task_description, report)
+        review_status = decide_review_status(assessment)
+        review_record: dict[str, Any] = {
+            "incident": os.path.basename(incident_path),
+            "status": review_status,
+            "review_type": "llm_judge",
+            "created_at": ts.isoformat(),
+            "updated_at": ts.isoformat(),
+            "assessment": assessment.model_dump() if assessment else None,
+            "human_review": None,
+        }
+        await self._write_review_record(incident_path, review_record)
+
         summary = _heuristic_summary(task_description, report)
         await self._update_memory_md(
             session_id=session_id,
             summary=summary,
             incident_path=incident_path,
             ts=ts,
+            review_status=review_status,
         )
 
-        await self._index_incident_to_milvus(incident_path)
+        if review_status == "approved":
+            await self._index_incident_to_milvus(incident_path)
+        else:
+            logger.info(
+                f"[MemoryWriter] Incident 状态为 {review_status}，暂不写入 Milvus: {incident_path}"
+            )
 
         return incident_path
 
@@ -138,14 +163,10 @@ class MemoryWriter:
         try:
             from app.services.vector_index_service import vector_index_service
 
-            await asyncio.to_thread(
-                vector_index_service.index_single_file, incident_path
-            )
+            await asyncio.to_thread(vector_index_service.index_single_file, incident_path)
             logger.info(f"[MemoryWriter] Incident 已索引到 Milvus: {incident_path}")
         except Exception as e:
-            logger.warning(
-                f"[MemoryWriter] Incident 索引到 Milvus 失败（不影响主流程）: {e}"
-            )
+            logger.warning(f"[MemoryWriter] Incident 索引到 Milvus 失败（不影响主流程）: {e}")
 
     async def _update_memory_md(
         self,
@@ -153,6 +174,7 @@ class MemoryWriter:
         summary: str,
         incident_path: str,
         ts: datetime,
+        review_status: str,
     ) -> None:
         """更新 MEMORY.md 中的 Incident 索引表（Hot）。"""
         link = f"[{os.path.basename(incident_path)}]({incident_path})"
@@ -160,12 +182,13 @@ class MemoryWriter:
             f"| {ts.strftime('%Y-%m-%d %H:%M')} "
             f"| {session_id} "
             f"| {summary} "
+            f"| {review_status} "
             f"| {link} |"
         )
 
         try:
             if os.path.exists(_MEMORY_MD):
-                async with aiofiles.open(_MEMORY_MD, mode="r", encoding="utf-8") as f:
+                async with aiofiles.open(_MEMORY_MD, encoding="utf-8") as f:
                     existing = await f.read()
             else:
                 existing = _MEMORY_MD_TEMPLATE
@@ -173,22 +196,35 @@ class MemoryWriter:
             lines = existing.splitlines()
 
             table_start = next(
-                (i for i, l in enumerate(lines) if l.startswith("| 时间")), None
+                (i for i, line in enumerate(lines) if line.startswith("| 时间")), None
             )
             if table_start is not None:
+                # 兼容旧版四列表格：旧记录已经进入过 Milvus，迁移时视为 approved。
+                if "知识状态" not in lines[table_start]:
+                    lines[table_start] = "| 时间 | 会话 ID | 摘要 | 知识状态 | 报告 |"
+                    if table_start + 1 < len(lines):
+                        lines[table_start + 1] = "|------|---------|------|----------|------|"
+                    for index, line in enumerate(lines):
+                        if not _is_memory_table_data_row(line):
+                            continue
+                        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+                        if len(cells) == 4:
+                            cells.insert(-1, "approved")
+                            lines[index] = "| " + " | ".join(cells) + " |"
                 insert_pos = table_start + 2
                 lines.insert(insert_pos, new_entry)
-                data_lines = [l for l in lines if _is_memory_table_data_row(l)]
+                data_lines = [line for line in lines if _is_memory_table_data_row(line)]
                 if len(data_lines) > _MAX_RECENT_INCIDENTS:
-                    other_lines = [l for l in lines if not _is_memory_table_data_row(l)]
+                    other_lines = [line for line in lines if not _is_memory_table_data_row(line)]
                     table_idx = next(
-                        (i for i, l in enumerate(other_lines) if l.startswith("| 时间")), None
+                        (i for i, line in enumerate(other_lines) if line.startswith("| 时间")),
+                        None,
                     )
                     if table_idx is not None:
                         lines = (
                             other_lines[: table_idx + 2]
                             + data_lines[:_MAX_RECENT_INCIDENTS]
-                            + other_lines[table_idx + 2:]
+                            + other_lines[table_idx + 2 :]
                         )
             else:
                 lines.append(new_entry)
@@ -197,9 +233,88 @@ class MemoryWriter:
             async with aiofiles.open(_MEMORY_MD, mode="w", encoding="utf-8") as f:
                 await f.write(updated)
 
-            logger.info(f"[MemoryWriter] MEMORY.md 已更新")
+            logger.info("[MemoryWriter] MEMORY.md 已更新")
         except Exception as e:
             logger.error(f"[MemoryWriter] 更新 MEMORY.md 失败: {e}")
+
+    async def _write_review_record(
+        self,
+        incident_path: str,
+        record: dict[str, Any],
+    ) -> None:
+        review_path = f"{incident_path}{_REVIEW_SUFFIX}"
+        async with aiofiles.open(review_path, mode="w", encoding="utf-8") as f:
+            await f.write(json.dumps(record, ensure_ascii=False, indent=2))
+
+    def list_reviews(self, status: str | None = None) -> list[dict[str, Any]]:
+        """列出知识审核记录，默认返回全部状态。"""
+        _ensure_dirs()
+        records: list[dict[str, Any]] = []
+        for review_path in Path(_INCIDENTS_DIR).glob(f"*{_REVIEW_SUFFIX}"):
+            try:
+                record = json.loads(review_path.read_text(encoding="utf-8"))
+                if status is None or record.get("status") == status:
+                    records.append(record)
+            except Exception as exc:
+                logger.warning(f"[MemoryWriter] 读取审核记录失败 {review_path}: {exc}")
+        return sorted(
+            records,
+            key=lambda item: item.get("created_at", ""),
+            reverse=True,
+        )
+
+    async def human_review(
+        self,
+        incident_name: str,
+        decision: Literal["approved", "rejected"],
+        reviewer: str,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """人工批准或拒绝候选记忆；批准后才写入 Milvus。"""
+        safe_name = os.path.basename(incident_name)
+        if safe_name != incident_name or not safe_name.endswith(".md"):
+            raise ValueError("非法 incident 文件名")
+
+        incident_path = os.path.join(_INCIDENTS_DIR, safe_name)
+        review_path = f"{incident_path}{_REVIEW_SUFFIX}"
+        if not os.path.exists(incident_path) or not os.path.exists(review_path):
+            raise FileNotFoundError(safe_name)
+
+        async with aiofiles.open(review_path, encoding="utf-8") as f:
+            record = json.loads(await f.read())
+
+        previous_status = record.get("status")
+        record["status"] = decision
+        record["updated_at"] = datetime.now().isoformat()
+        record["human_review"] = {
+            "reviewer": reviewer,
+            "decision": decision,
+            "note": note,
+            "reviewed_at": record["updated_at"],
+        }
+        await self._write_review_record(incident_path, record)
+        await self._update_memory_status(safe_name, decision)
+
+        if decision == "approved" and previous_status != "approved":
+            await self._index_incident_to_milvus(incident_path)
+        return record
+
+    async def _update_memory_status(self, incident_name: str, status: str) -> None:
+        """同步更新 MEMORY.md 中对应 Incident 的审核状态。"""
+        if not os.path.exists(_MEMORY_MD):
+            return
+        async with aiofiles.open(_MEMORY_MD, encoding="utf-8") as f:
+            lines = (await f.read()).splitlines()
+        for index, line in enumerate(lines):
+            if incident_name not in line or not _is_memory_table_data_row(line):
+                continue
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) >= 5:
+                cells[-2] = status
+                lines[index] = "| " + " | ".join(cells) + " |"
+            break
+        async with aiofiles.open(_MEMORY_MD, mode="w", encoding="utf-8") as f:
+            await f.write("\n".join(lines) + "\n")
 
 
 def _is_memory_table_data_row(line: str) -> bool:
@@ -213,13 +328,13 @@ def _is_memory_table_data_row(line: str) -> bool:
 _MEMORY_MD_TEMPLATE = """\
 # SuperBizAgent — 活跃记忆索引 (MEMORY.md)
 
-> Hot 层：由系统自动维护，供 Planner / RAG 每轮加载。每条含简短摘要 + 指向 Cold 完整报告的链接。
+> Hot 层：由系统自动维护。只有 approved 报告可作为正式知识；pending_review 等待人工判断。
 > 手动编辑时请保持表格为单行单元格（摘要列勿换行）。
 
 ## 最近诊断索引
 
-| 时间 | 会话 ID | 摘要 | 报告 |
-|------|---------|------|------|
+| 时间 | 会话 ID | 摘要 | 知识状态 | 报告 |
+|------|---------|------|----------|------|
 
 ## 目录说明
 

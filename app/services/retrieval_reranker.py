@@ -10,6 +10,7 @@ from langchain_core.documents import Document
 from loguru import logger
 
 from app.config import config
+from app.services.retrieval_confidence import parent_key
 
 _cross_encoder = None
 
@@ -187,19 +188,19 @@ def rerank_documents(
         else [1 - index / max(len(documents) - 1, 1) for index in range(len(documents))]
     )
 
-    best_by_source: dict[str, tuple[Document, float, float, float]] = {}
+    best_by_parent: dict[str, tuple[Document, float, float, float]] = {}
     for index, (doc, raw_score, cross_score) in enumerate(
         zip(documents, scores, normalized_cross, strict=True)
     ):
-        source = _source_name(doc) or f"__chunk_{index}"
+        dedupe_key = parent_key(doc) or f"__chunk_{index}"
         initial_score = normalized_initial[index]
         raw_initial_score = initial_scores[index] if initial_scores is not None else initial_score
         score = weight * cross_score + (1 - weight) * initial_score
-        current = best_by_source.get(source)
+        current = best_by_parent.get(dedupe_key)
         if current is None or score > current[1]:
-            best_by_source[source] = (doc, score, raw_score, raw_initial_score)
+            best_by_parent[dedupe_key] = (doc, score, raw_score, raw_initial_score)
 
-    ranked = sorted(best_by_source.values(), key=lambda item: item[1], reverse=True)[:k]
+    ranked = sorted(best_by_parent.values(), key=lambda item: item[1], reverse=True)[:k]
     results: list[Document] = []
     for doc, score, raw_score, raw_initial_score in ranked:
         metadata = dict(doc.metadata)
@@ -234,9 +235,9 @@ def rerank_with_fallback(
         results: list[Document] = []
         seen: set[str] = set()
         for doc in candidate_docs:
-            source = _source_name(doc)
-            if source and source not in seen:
-                seen.add(source)
+            dedupe_key = parent_key(doc)
+            if dedupe_key and dedupe_key not in seen:
+                seen.add(dedupe_key)
                 results.append(doc)
             if len(results) == k:
                 break

@@ -28,9 +28,7 @@ def test_planner_context_uses_matched_child_instead_of_full_parent() -> None:
     )
     outcome = SimpleNamespace(
         documents=[doc],
-        confidence=ConfidenceResult(
-            0.6, "high", 0.5, 0.5, 0.5, "case_scope_memory.md"
-        ),
+        confidence=ConfidenceResult(0.6, "high", high_confidence_parent_count=3),
         attempts=1,
         rewritten=False,
         reranker_used=False,
@@ -71,7 +69,7 @@ def test_context_budgeting_does_not_change_retrieval_metrics() -> None:
     ]
     outcome = SimpleNamespace(
         documents=docs,
-        confidence=ConfidenceResult(0.6, "high", 0.5, 0.5, 0.5, "scope_memory.md"),
+        confidence=ConfidenceResult(0.6, "high", high_confidence_parent_count=3),
         attempts=1,
         rewritten=False,
         reranker_used=False,

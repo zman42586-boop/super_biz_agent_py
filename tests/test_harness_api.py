@@ -43,7 +43,7 @@ def test_run_api_create_inspect_cancel_and_resume(tmp_path, monkeypatch) -> None
             "evaluator_name": "human-review",
             "score": 9,
             "passed": True,
-            "metrics": {"root_cause_accuracy": 1},
+            "metrics": {"root_cause_accuracy": 1, "hit_at_1": 1},
             "comment": "correct diagnosis",
         },
     )
@@ -53,6 +53,21 @@ def test_run_api_create_inspect_cancel_and_resume(tmp_path, monkeypatch) -> None
     evaluations = client.get(f"/api/runs/{run_id}/evaluations")
     assert evaluations.status_code == 200
     assert evaluations.json()["evaluations"][0]["experiment_name"] == "candidate-v1"
+
+    quality_metrics = client.get("/api/runs/metrics/summary?window_hours=24")
+    assert quality_metrics.json()["quality"]["hit_at_1"] == 1.0
+    assert quality_metrics.json()["quality"]["hit_at_1_evaluation_count"] == 1
+
+    invalid_hit = client.post(
+        f"/api/runs/{run_id}/evaluations",
+        json={
+            "evaluator_name": "invalid-evaluator",
+            "score": 1,
+            "passed": False,
+            "metrics": {"hit_at_1": 1.2},
+        },
+    )
+    assert invalid_hit.status_code == 422
 
     cancelled = client.post(f"/api/runs/{run_id}/cancel")
     assert cancelled.json()["status"] == "cancelled"

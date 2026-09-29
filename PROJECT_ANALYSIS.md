@@ -6,12 +6,11 @@
 
 ## 一、项目整体业务含义
 
-**SuperBizAgent** 是一个**企业级智能 OnCall 运维助手系统**，核心目标是降低 OnCall 工程师的排查负担，通过 AI Agent 自动完成故障诊断和知识问答。
+**SuperBizAgent** 是一个**企业级智能 OnCall 运维助手系统**，核心目标是降低 OnCall 工程师的排查负担，通过 AI Agent 自动完成故障诊断。
 
 ### 业务场景
 
-- **场景 A — 知识问答**：运维人员遇到问题，直接向 Agent 提问，Agent 从知识库（向量数据库）检索相关文档，结合 LLM 生成准确回答
-- **场景 B — 自动诊断**：系统出现告警时，Agent 自动调用 MCP 工具（日志查询 + 监控数据），按 Plan-Execute-Replan 流程逐步排查，最终输出根因分析报告
+- **自动诊断**：系统出现告警时，Agent 自动调用知识库、日志和监控工具，按 Plan-Execute-Replan 流程逐步排查，最终输出根因分析报告。
 
 ### 技术选型动机
 
@@ -27,17 +26,16 @@
 
 ## 二、核心功能模块拆解
 
-### 模块 1：RAG 智能对话（知识库问答）
+### 模块 1：AIOps 按需知识检索
 
 ```
-用户提问 → 向量检索(Top-K) → 拼接上下文 → LLM生成回答
+Planner/Executor 判断需要知识证据 → retrieve_knowledge → 混合检索 → 返回诊断证据
 ```
 
 **涉及文件：**
 
 | 文件 | 职责 |
 |------|------|
-| [app/services/rag_agent_service.py](app/services/rag_agent_service.py) | 核心 RAG Agent，基于 LangGraph + ChatQwen |
 | [app/tools/knowledge_tool.py](app/tools/knowledge_tool.py) | 知识检索工具（`retrieve_knowledge`） |
 | [app/services/vector_store_manager.py](app/services/vector_store_manager.py) | Milvus VectorStore 封装 |
 | [app/services/vector_search_service.py](app/services/vector_search_service.py) | 底层向量搜索 |
@@ -50,8 +48,8 @@
 
 1. 用户上传 `.md`/`.txt` → 按标题+字符分块（chunk_size=800, overlap=100）
 2. DashScope Embedding API 向量化 → 存入 Milvus `biz` collection
-3. 用户提问 → `retrieve_knowledge` 工具检索 Top-K 文档
-4. 拼接 system prompt + 检索结果 → Qwen-Max 生成回答
+3. Agent 在诊断步骤中按需调用 `retrieve_knowledge`，检索 Top-K 证据
+4. 检索证据进入 `past_steps`，由 Replanner 决定继续、改计划或生成报告
 
 ### 模块 2：AIOps 智能运维（Plan-Execute-Replan）
 
@@ -119,12 +117,11 @@ Planner(制定计划) → Executor(执行步骤+调用MCP工具) → Replanner(�
 | `service_unavailable.md` | 7.5 KB | 服务不可用排查方案 |
 | `slow_response.md` | 6.6 KB | 服务响应慢排查方案 |
 
-### 模块 5：会话管理
+### 模块 5：Run 状态与恢复
 
-- 基于 LangGraph MemorySaver（内存检查点）
-- 支持会话持久化（thread_id 机制）
-- 消息历史修剪（保留最近 6 条，超过 7 条自动裁剪）
-- 前端 localStorage 存储历史对话列表（最多 50 条）
+- LangGraph `MemorySaver` 保存进程内图状态
+- Harness 将 Run、Step、ToolCall、Event 和恢复快照写入数据库
+- `plan`、`past_steps` 和工具证据支持诊断续作
 
 ---
 
@@ -142,17 +139,17 @@ Planner(制定计划) → Executor(执行步骤+调用MCP工具) → Replanner(�
 ┌──────────────────────────────▼──────────────────────────────────────┐
 │                      FastAPI Application                            │
 │  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────────┐   │
-│  │ /api/chat │  │ /api/     │  │ /api/     │  │ /api/health   │   │
-│  │ /api/     │  │ aiops     │  │ upload    │  │               │   │
-│  │ chat_     │  │ (SSE)     │  │           │  │               │   │
-│  │ stream    │  │           │  │           │  │               │   │
+│  │ /api/runs │  │ /api/     │  │ /api/     │  │ /api/health   │   │
+│  │ /api/runs │  │ aiops     │  │ upload    │  │               │   │
+│  │ events    │  │ (SSE)     │  │           │  │               │   │
+│  │           │  │           │  │           │  │               │   │
 │  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └───────┬───────┘   │
 │        │              │              │                │             │
 │  ┌─────▼──────┐ ┌─────▼──────────┐ ┌─▼────────────┐  │             │
-│  │ RAG Agent  │ │ AIOps Service  │ │ Vector Index │  │             │
-│  │ Service    │ │ (Plan-Exec-    │ │ Service      │  │             │
-│  │ (LangGraph │ │  Replan)       │ │              │  │             │
-│  │  + ChatQwen│ │                │ │              │  │             │
+│  │ Harness    │ │ AIOps Service  │ │ Vector Index │  │             │
+│  │ Worker/API │ │ (Plan-Exec-    │ │ Service      │  │             │
+│  │ Run/Step/  │ │  Replan)       │ │              │  │             │
+│  │ ToolCall   │ │                │ │              │  │             │
 │  └──┬───┬─────┘ └───┬────┬───────┘ └──┬───┬───────┘  │             │
 │     │   │           │    │             │   │          │             │
 │     │   │    ┌──────┘    │             │   │          │             │
@@ -190,7 +187,7 @@ Planner(制定计划) → Executor(执行步骤+调用MCP工具) → Replanner(�
 | 层 | 目录 | 职责 |
 |---|------|------|
 | **路由层** | `app/api/` | HTTP 请求处理、SSE 流式适配、输入验证 |
-| **服务层** | `app/services/` | 业务逻辑编排（RAG Agent、AIOps 工作流、向量索引） |
+| **服务层** | `app/services/` | 业务逻辑编排（AIOps 工作流、检索与向量索引） |
 | **Agent 层** | `app/agent/` | LangGraph 节点实现（Planner/Executor/Replanner）、MCP 客户端管理 |
 | **工具层** | `app/tools/` | LangChain Tool 定义（知识检索、时间查询） |
 | **数据模型层** | `app/models/` | Pydantic 请求/响应模型 |
@@ -204,24 +201,10 @@ Planner(制定计划) → Executor(执行步骤+调用MCP工具) → Replanner(�
 
 | 功能 | 方法 | 路径 | 说明 |
 |------|------|------|------|
-| 普通对话 | POST | `/api/chat` | 一次性返回 |
-| 流式对话 | POST | `/api/chat_stream` | SSE 流式输出 |
 | AIOps 诊断 | POST | `/api/aiops` | 自动故障诊断（SSE 流式） |
 | 文件上传 | POST | `/api/upload` | 上传并索引文档 |
 | 索引目录 | POST | `/api/index_directory` | 批量索引指定目录 |
 | 健康检查 | GET | `/api/health` | 服务状态检查 |
-| 会话历史 | GET | `/api/chat/session/{id}` | 查询会话消息历史 |
-| 清空会话 | POST | `/api/chat/clear` | 清空指定会话 |
-
-### SSE 事件类型（对话流）
-
-| 事件类型 | 说明 |
-|---------|------|
-| `content` | 流式内容块（实时渲染 Markdown） |
-| `tool_call` | 工具调用状态通知 |
-| `search_results` | RAG 检索结果 |
-| `done` | 流式输出完成 |
-| `error` | 错误信息 |
 
 ### SSE 事件类型（AIOps 诊断流）
 
@@ -235,10 +218,10 @@ Planner(制定计划) → Executor(执行步骤+调用MCP工具) → Replanner(�
 
 ### 关键设计决策
 
-1. **全局单例模式** — 所有 Service、Manager 都是模块级单例（`rag_agent_service`、`aiops_service`、`milvus_manager`、`vector_store_manager` 等）
+1. **全局单例模式** — 核心 Service、Manager 使用模块级单例（`aiops_service`、`milvus_manager`、`vector_store_manager` 等）
 2. **延迟初始化** — Agent 中的 MCP 工具在首次查询时异步加载，避免启动时阻塞
 3. **会话隔离** — 通过 LangGraph `thread_id` 机制实现多会话隔离
-4. **流式输出** — 全部对话/诊断接口使用 SSE（Server-Sent Events），非 WebSocket
+4. **流式输出** — AIOps 诊断接口使用 SSE（Server-Sent Events），非 WebSocket
 5. **重试机制** — MCP 工具调用内置指数退避重试（最多 3 次，1s/2s/4s）
 6. **内存存储** — 会话检查点使用 MemorySaver（进程重启丢失），适合单机部署
 
@@ -275,7 +258,7 @@ Planner(制定计划) → Executor(执行步骤+调用MCP工具) → Replanner(�
 |------|------|--------|
 | 可观测性 | 添加 Prometheus metrics、请求追踪（trace_id） | P1 |
 | CI/CD | GitHub Actions / Jenkins pipeline | P1 |
-| API 版本化 | `/api/v1/chat` 等版本化路由 | P2 |
+| API 版本化 | `/api/v1/aiops` 等版本化路由 | P2 |
 | 数据库迁移工具 | Alembic 管理 Milvus schema 变更 | P2 |
 
 ### 前端任务
@@ -285,7 +268,6 @@ Planner(制定计划) → Executor(执行步骤+调用MCP工具) → Replanner(�
 | 任务 | 说明 | 优先级 |
 |------|------|--------|
 | 错误处理优化 | 统一错误码映射、网络断开重连提示、超时处理 | P0 |
-| 流式对话体验优化 | 流式输出中断/恢复、Token 级渲染（当前为全量 Markdown 刷新） | P0 |
 | AIOps 诊断进度可视化 | 实时显示当前执行步骤、工具调用状态（类似 CI/CD Pipeline） | P0 |
 | 移动端适配 | 响应式布局，支持手机浏览器 | P1 |
 
@@ -294,7 +276,6 @@ Planner(制定计划) → Executor(执行步骤+调用MCP工具) → Replanner(�
 | 任务 | 说明 | 优先级 |
 |------|------|--------|
 | Markdown 渲染优化 | 支持表格、Mermaid 图表、任务列表等扩展语法 | P1 |
-| 会话管理增强 | 会话重命名、批量删除、搜索历史对话 | P1 |
 | 知识库管理界面 | 查看已索引文档列表、手动删除/重新索引 | P1 |
 | 暗色模式 | 主题切换 | P2 |
 | 多语言 | 中英文切换 | P2 |

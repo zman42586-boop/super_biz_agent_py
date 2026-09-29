@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.core.llm_factory import llm_factory
 from app.tools.catalog import (
+    RiskLevel,
     fallback_tool_names,
     format_tool_catalog,
     select_tools_by_name,
@@ -55,10 +56,25 @@ async def select_tools_for_task(
     tools: Iterable[Any],
     *,
     max_tools: int = 3,
+    allowed_risk_levels: frozenset[RiskLevel] = frozenset({"read"}),
 ) -> list[Any]:
-    """Select a bounded tool set before exposing any full schemas to the executor."""
+    """Select a bounded, policy-allowed set before exposing full schemas.
 
-    available = list(tools)
+    Write and dangerous tools stay invisible unless the caller explicitly adds
+    their level after completing the corresponding authorization/approval flow.
+    """
+
+    registered = list(tools)
+    available = [
+        tool for tool in registered if tool_metadata(tool).risk_level in allowed_risk_levels
+    ]
+    denied = [
+        tool_name(tool)
+        for tool in registered
+        if tool_metadata(tool).risk_level not in allowed_risk_levels
+    ]
+    if denied:
+        logger.warning(f"工具风险策略未授权，跳过挂载: {', '.join(denied)}")
     if not available:
         return []
 
@@ -97,6 +113,9 @@ async def select_tools_for_task(
 
     logger.info(
         "按需挂载工具: "
-        + ", ".join(f"{tool_name(tool)}[{tool_metadata(tool).domain}]" for tool in selected)
+        + ", ".join(
+            f"{tool_name(tool)}[{tool_metadata(tool).domain}/{tool_metadata(tool).risk_level}]"
+            for tool in selected
+        )
     )
     return selected

@@ -137,7 +137,7 @@ def test_agentops_metrics_and_quality_evaluation(tmp_path) -> None:
         evaluator_name="human-review",
         score=8.5,
         passed=True,
-        metrics={"root_cause_accuracy": 0.9},
+        metrics={"root_cause_accuracy": 0.9, "hit_at_1": 1.0},
         comment="root cause and evidence are correct",
     )
     assert evaluation["score"] == 8.5
@@ -157,6 +157,8 @@ def test_agentops_metrics_and_quality_evaluation(tmp_path) -> None:
     assert summary["tools"]["latency_ms"]["p95"] == 20
     assert summary["quality"]["average_score"] == 8.5
     assert summary["quality"]["pass_rate"] == 1.0
+    assert summary["quality"]["hit_at_1"] == 1.0
+    assert summary["quality"]["hit_at_1_evaluation_count"] == 1
 
 
 def test_empty_agentops_metrics_use_null_rates(tmp_path) -> None:
@@ -165,3 +167,5 @@ def test_empty_agentops_metrics_use_null_rates(tmp_path) -> None:
     assert summary["runs"]["success_rate"] is None
     assert summary["tools"]["latency_ms"]["p95"] is None
     assert summary["quality"]["average_score"] is None
+    assert summary["quality"]["hit_at_1"] is None
+    assert summary["quality"]["hit_at_1_evaluation_count"] == 0

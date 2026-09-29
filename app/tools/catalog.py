@@ -10,24 +10,27 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+
+RiskLevel = Literal["read", "write", "dangerous"]
 
 
 @dataclass(frozen=True)
 class ToolMetadata:
     domain: str
     summary: str
+    risk_level: RiskLevel
 
 
 # Self-owned tools use reviewed summaries instead of runtime LLM summarisation.
 TOOL_METADATA: dict[str, ToolMetadata] = {
-    "get_current_time": ToolMetadata("time", "查询指定时区的当前日期和时间"),
-    "retrieve_knowledge": ToolMetadata("knowledge", "从知识库检索相关文档和历史经验"),
-    "search_log": ToolMetadata("logs", "按关键词和时间范围检索本地运行日志"),
-    "query_cpu_metrics": ToolMetadata("monitoring", "查询指定服务的 CPU 使用率和核数"),
-    "query_memory_metrics": ToolMetadata("monitoring", "查询指定服务的内存使用情况"),
-    "list_lhm_sensors": ToolMetadata("monitoring", "列出本机硬件温度传感器及实时值"),
-    "get_lhm_temperature": ToolMetadata("monitoring", "查询匹配的本机硬件温度传感器"),
+    "get_current_time": ToolMetadata("time", "查询指定时区的当前日期和时间", "read"),
+    "retrieve_knowledge": ToolMetadata("knowledge", "从知识库检索相关文档和历史经验", "read"),
+    "search_log": ToolMetadata("logs", "按关键词和时间范围检索本地运行日志", "read"),
+    "query_cpu_metrics": ToolMetadata("monitoring", "查询指定服务的 CPU 使用率和核数", "read"),
+    "query_memory_metrics": ToolMetadata("monitoring", "查询指定服务的内存使用情况", "read"),
+    "list_lhm_sensors": ToolMetadata("monitoring", "列出本机硬件温度传感器及实时值", "read"),
+    "get_lhm_temperature": ToolMetadata("monitoring", "查询匹配的本机硬件温度传感器", "read"),
 }
 
 DOMAIN_LABELS = {
@@ -75,7 +78,8 @@ def tool_metadata(tool: Any) -> ToolMetadata:
     first_line = next((line.strip() for line in description.splitlines() if line.strip()), "")
     first_sentence = re.split(r"(?<=[。！？.!?])\s*", first_line, maxsplit=1)[0]
     summary = first_sentence[:80].strip() or f"调用 {name} 工具"
-    return ToolMetadata(_infer_domain(f"{name} {summary}"), summary)
+    # Unknown tools fail closed until a developer reviews and registers their risk.
+    return ToolMetadata(_infer_domain(f"{name} {summary}"), summary, "dangerous")
 
 
 def format_tool_catalog(tools: Iterable[Any]) -> str:
@@ -87,7 +91,9 @@ def format_tool_catalog(tools: Iterable[Any]) -> str:
         if not name:
             continue
         metadata = tool_metadata(tool)
-        grouped.setdefault(metadata.domain, []).append((name, metadata.summary))
+        grouped.setdefault(metadata.domain, []).append(
+            (name, f"[risk={metadata.risk_level}] {metadata.summary}")
+        )
 
     if not grouped:
         return "（当前没有可用工具）"

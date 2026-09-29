@@ -7,7 +7,7 @@ from app.services.retrieval_context import format_diagnostic_context
 def test_empty_retrieval_still_requires_unknown_cause_and_more_evidence() -> None:
     outcome = SimpleNamespace(
         documents=[],
-        confidence=ConfidenceResult(0.0, "low", 0.0, 0.0, 0.0, ""),
+        confidence=ConfidenceResult(0.0, "low"),
         attempts=2,
         rewritten=True,
         reranker_used=False,

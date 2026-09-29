@@ -178,6 +178,7 @@ class HarnessRepository:
                     "evaluator_name": evaluator_name,
                     "score": score,
                     "passed": passed,
+                    "metrics": _json_safe(metrics or {}),
                 },
             )
             return self._evaluation_dict(evaluation)
@@ -256,6 +257,14 @@ class HarnessRepository:
             if run.error_code:
                 error_codes[run.error_code] = error_codes.get(run.error_code, 0) + 1
 
+        hit_at_1_values = [
+            float(row.metrics_json["hit_at_1"])
+            for row in evaluations
+            if isinstance(row.metrics_json, dict)
+            and isinstance(row.metrics_json.get("hit_at_1"), (int, float))
+            and 0.0 <= float(row.metrics_json["hit_at_1"]) <= 1.0
+        ]
+
         return {
             "window": {
                 "hours": window_hours,
@@ -295,6 +304,12 @@ class HarnessRepository:
                 "pass_rate": self._ratio(
                     sum(row.passed for row in evaluations), len(evaluations)
                 ),
+                "hit_at_1": (
+                    round(sum(hit_at_1_values) / len(hit_at_1_values), 4)
+                    if hit_at_1_values
+                    else None
+                ),
+                "hit_at_1_evaluation_count": len(hit_at_1_values),
             },
         }
 
