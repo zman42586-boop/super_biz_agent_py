@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import glob
+import hashlib
 import os
 import re
+from collections import deque
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -67,13 +69,15 @@ def search_log(query: str = "", minutes: int = 60, limit: int = 100) -> dict[str
         )
 
     keywords = [kw.strip().lower() for kw in query.split() if kw.strip()]
-    logs: list[dict[str, str]] = []
+    # Keep the latest matching records so newly appended lines are not hidden
+    # behind an already-full result limit.
+    logs: deque[dict[str, str | int]] = deque(maxlen=limit)
     files_scanned = 0
 
     for log_file in log_files:
         try:
             with open(log_file, encoding="utf-8", errors="replace") as f:
-                for raw_line in f:
+                for line_number, raw_line in enumerate(f, start=1):
                     raw_line = raw_line.rstrip("\n")
                     match = _LOG_LINE_RE.match(raw_line)
                     if not match:
@@ -97,6 +101,11 @@ def search_log(query: str = "", minutes: int = 60, limit: int = 100) -> dict[str
 
                     logs.append(
                         {
+                            "log_id": hashlib.sha256(
+                                f"{log_file}:{line_number}:{raw_line}".encode()
+                            ).hexdigest()[:20],
+                            "source": log_file,
+                            "line_number": line_number,
                             "timestamp": match.group("ts"),
                             "level": level,
                             "location": location,
@@ -104,15 +113,9 @@ def search_log(query: str = "", minutes: int = 60, limit: int = 100) -> dict[str
                         }
                     )
 
-                    if len(logs) >= limit:
-                        break
-
             files_scanned += 1
         except OSError as exc:
             logger.warning(f"读取日志文件失败: {log_file}, error={exc}")
-
-        if len(logs) >= limit:
-            break
 
     raw_result = {
         "query": query,
@@ -123,7 +126,7 @@ def search_log(query: str = "", minutes: int = 60, limit: int = 100) -> dict[str
         },
         "limit": limit,
         "total": len(logs),
-        "logs": logs,
+        "logs": list(logs),
         "files_scanned": files_scanned,
         "message": f"找到 {len(logs)} 条匹配日志" if logs else "未找到匹配日志",
     }
@@ -135,6 +138,8 @@ def search_log(query: str = "", minutes: int = 60, limit: int = 100) -> dict[str
             "limit": limit,
             "total": len(logs),
             "files_scanned": files_scanned,
+            # Keep the compact evidence list bounded even when limit=500.
+            "log_ids": [entry["log_id"] for entry in list(logs)[-100:]],
         },
         raw_result=raw_result,
     )

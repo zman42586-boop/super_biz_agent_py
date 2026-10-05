@@ -36,6 +36,23 @@ class SlowTool(FakeTool):
         return arguments
 
 
+class JsonMetricTool:
+    name = "query_cpu_metrics"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def ainvoke(self, arguments):
+        self.calls += 1
+        return json.dumps(
+            {
+                "service_name": arguments["service_name"],
+                "current_cpu_percent": 96,
+                "alert_info": {"threshold": 80, "triggered": True},
+            }
+        )
+
+
 def _repository(tmp_path) -> HarnessRepository:
     path = (tmp_path / "gateway.sqlite").as_posix()
     return HarnessRepository(f"sqlite+pysqlite:///{path}")
@@ -77,6 +94,42 @@ async def test_gateway_rejects_invalid_arguments_before_call() -> None:
 
     assert exc_info.value.code == "INVALID_ARGUMENTS"
     assert tool.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_normalizes_json_text_from_monitoring_tool() -> None:
+    result = await ToolGateway().execute(
+        tool=JsonMetricTool(), arguments={"service_name": "matlab"}
+    )
+    assert result.structured_content is not None
+    assert result.structured_content["key_facts"]["current_cpu_percent"] == 96
+
+
+@pytest.mark.asyncio
+async def test_dynamic_call_replay_in_same_step_uses_cache(tmp_path) -> None:
+    repository = _repository(tmp_path)
+    run = repository.create_run(task="cpu", session_id="cpu-cache")
+    repository.claim_next_run("worker", lease_seconds=30)
+    step = repository.start_step(run["id"], 0, "cpu")
+    tool = JsonMetricTool()
+    gateway = ToolGateway()
+    with harness_run_context(HarnessRunContext(run["id"], repository)):
+        first = await gateway.execute(
+            tool=tool,
+            arguments={"service_name": "matlab"},
+            step_id=step["id"],
+            step_index=0,
+        )
+        second = await gateway.execute(
+            tool=tool,
+            arguments={"service_name": "matlab"},
+            step_id=step["id"],
+            step_index=0,
+        )
+    assert first.cached is False
+    assert second.cached is True
+    assert tool.calls == 1
+    repository.close()
 
 
 @pytest.mark.asyncio

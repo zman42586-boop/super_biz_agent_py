@@ -6,9 +6,12 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from app.harness.config import HarnessSettings, harness_settings
+from app.harness.progress import evidence_keys
+from app.tool_observation import DYNAMIC_TOOL_NAMES
 
 _NON_PROGRESS_MARKERS = (
     "执行失败",
@@ -39,8 +42,9 @@ class LoopGuardPolicy:
     max_steps: int = 8
     max_tool_calls: int = 20
     max_repeated_steps: int = 2
-    max_repeated_tool_calls: int = 2
+    max_repeated_tool_calls: int = 3
     max_no_progress_steps: int = 2
+    min_dynamic_call_interval_seconds: float = 5.0
 
     @classmethod
     def from_settings(cls, settings: HarnessSettings) -> LoopGuardPolicy:
@@ -50,6 +54,7 @@ class LoopGuardPolicy:
             max_repeated_steps=max(1, settings.max_repeated_steps),
             max_repeated_tool_calls=max(1, settings.max_repeated_tool_calls),
             max_no_progress_steps=max(1, settings.max_no_progress_steps),
+            min_dynamic_call_interval_seconds=max(0.0, settings.min_dynamic_call_interval_seconds),
         )
 
 
@@ -88,18 +93,26 @@ class LoopGuard:
             )
 
         normalized_task = _normalize_text(task)
-        repeated = sum(
-            _normalize_text(previous_task) == normalized_task
-            for previous_task, _ in past_steps
+        matching_results = [
+            result
+            for previous_task, result in past_steps
+            if _normalize_text(previous_task) == normalized_task
+        ]
+        # Only apply the old repeated-step shortcut to unstructured identical
+        # text. Structured/dynamic observations are judged by evidence instead.
+        repeated_text = (
+            len(matching_results) >= self.policy.max_repeated_steps
+            and all(evidence_keys(result) is None for result in matching_results)
+            and len({_normalize_text(result) for result in matching_results}) == 1
         )
-        if normalized_task and repeated >= self.policy.max_repeated_steps:
+        if normalized_task and repeated_text:
             return LoopGuardDecision(
                 False,
                 "repeated_step",
                 "相同步骤已重复执行，停止循环并基于现有证据生成报告。",
                 {
                     "step": task,
-                    "previous_occurrences": repeated,
+                    "previous_occurrences": len(matching_results),
                     "limit": self.policy.max_repeated_steps,
                 },
             )
@@ -133,10 +146,39 @@ class LoopGuard:
 
         current = tool_fingerprint(tool_name, arguments)
         repeated = sum(
-            tool_fingerprint(str(call.get("tool_name", "")), call.get("arguments") or {})
-            == current
+            tool_fingerprint(str(call.get("tool_name", "")), call.get("arguments") or {}) == current
             for call in existing_calls
         )
+        if tool_name in DYNAMIC_TOOL_NAMES:
+            matching = [
+                call
+                for call in existing_calls
+                if tool_fingerprint(str(call.get("tool_name", "")), call.get("arguments") or {})
+                == current
+            ]
+            if matching and self.policy.min_dynamic_call_interval_seconds > 0:
+                last_call = matching[-1]
+                last_at = last_call.get("finished_at") or last_call.get("started_at")
+                try:
+                    timestamp = datetime.fromisoformat(str(last_at))
+                    if timestamp.tzinfo is None:
+                        timestamp = timestamp.replace(tzinfo=UTC)
+                    elapsed = (datetime.now(UTC) - timestamp).total_seconds()
+                except (TypeError, ValueError):
+                    elapsed = self.policy.min_dynamic_call_interval_seconds
+                if elapsed < self.policy.min_dynamic_call_interval_seconds:
+                    return LoopGuardDecision(
+                        False,
+                        "dynamic_tool_interval",
+                        "实时工具刚查询过相同参数，请等待下一个采样间隔或调整查询条件。",
+                        {
+                            "tool_name": tool_name,
+                            "min_interval_seconds": self.policy.min_dynamic_call_interval_seconds,
+                            "fingerprint": current[:16],
+                        },
+                    )
+            return LoopGuardDecision(True)
+
         if repeated >= self.policy.max_repeated_tool_calls:
             return LoopGuardDecision(
                 False,
@@ -157,15 +199,24 @@ class LoopGuard:
         if len(past_steps) < limit:
             return False
 
-        recent_results = [str(result or "").strip() for _, result in past_steps[-limit:]]
-        normalized = [_normalize_text(result) for result in recent_results]
-        if all(
-            not result
-            or any(marker in result.lower() for marker in _NON_PROGRESS_MARKERS)
-            for result in recent_results
-        ):
-            return True
-        return bool(normalized[0]) and len(set(normalized)) == 1
+        seen: set[str] = set()
+        no_progress = 0
+        previous_text = ""
+        for _, result in past_steps:
+            keys = evidence_keys(result)
+            if keys is not None:
+                progressed = bool(keys - seen)
+                seen.update(keys)
+            else:
+                result_text = str(result or "").strip()
+                normalized = _normalize_text(result_text)
+                failed = not result_text or any(
+                    marker in result_text.lower() for marker in _NON_PROGRESS_MARKERS
+                )
+                progressed = not failed and (not previous_text or normalized != previous_text)
+                previous_text = normalized
+            no_progress = 0 if progressed else no_progress + 1
+        return no_progress >= limit
 
 
 loop_guard = LoopGuard()

@@ -31,10 +31,12 @@ class Response(BaseModel):
 class Act(BaseModel):
     """重新规划的输出格式"""
 
-    action: str = Field(description="""下一步的行动，必须是以下三种之一：
+    action: str = Field(
+        description="""下一步的行动，必须是以下三种之一：
         - 'continue': 当前计划合理，继续执行下一个步骤
         - 'replan': 当前计划需要调整，提供新的步骤列表
-        - 'respond': 计划已完成且信息充足，生成最终响应""")
+        - 'respond': 计划已完成且信息充足，生成最终响应"""
+    )
     # action 为 'replan' 时，新的步骤列表（会替换当前剩余计划）
     new_steps: list[str] = Field(
         default_factory=list,
@@ -81,6 +83,7 @@ replanner_prompt = ChatPromptTemplate.from_messages(
                 评估标准：
                 - 当前信息是否已经足够解决用户问题？【最关键】
                 - 已执行步骤是否成功获取了核心信息？
+                - 新增日志行只是候选证据；判断是否与故障相关时，应指出对应的来源/行号，不能把时间戳或普通指标波动当成诊断进展
                 - 剩余步骤是否真的"必需"？
                 - 已执行步骤数是否过多（>= 5）？如果是，立即 respond
 
@@ -108,6 +111,7 @@ response_prompt = ChatPromptTemplate.from_messages(
                 - 使用 Markdown 格式
                 - 将结论严格分成“已观测事实”“知识库证据”“分析推断”
                 - 每个根因结论必须引用事实和证据；证据不足时写“原因未确定”，不要强行归因
+                - 引用日志时尽量附来源文件和行号；普通心跳或采样时间变化不能作为根因证据
                 - 建议单独列出，不能把建议描述成已经执行或已经验证
             """).strip(),
         ),
@@ -138,7 +142,7 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
     max_steps = harness_settings.max_steps
     if len(past_steps) >= max_steps:
         logger.warning(
-            f"已执行 {len(past_steps)} 个步骤，超过最大限制 {max_steps}，" "强制生成最终响应"
+            f"已执行 {len(past_steps)} 个步骤，超过最大限制 {max_steps}，强制生成最终响应"
         )
         llm = llm_factory.create_chat_model(
             temperature=0,

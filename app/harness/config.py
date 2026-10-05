@@ -26,7 +26,8 @@ class HarnessSettings:
     max_steps: int = 8
     max_tool_calls: int = 20
     max_repeated_steps: int = 2
-    max_repeated_tool_calls: int = 2
+    max_repeated_tool_calls: int = 3
+    min_dynamic_call_interval_seconds: float = 5.0
     max_no_progress_steps: int = 2
     graph_recursion_limit: int = 32
 
@@ -42,8 +43,7 @@ class HarnessSettings:
             port = os.getenv("HARNESS_MYSQL_PORT", "3306")
             database = os.getenv("HARNESS_MYSQL_DATABASE", "superbiz_agent")
             database_url = (
-                f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
-                "?charset=utf8mb4"
+                f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}?charset=utf8mb4"
             )
 
         return cls(
@@ -57,15 +57,12 @@ class HarnessSettings:
             max_steps=int(os.getenv("HARNESS_MAX_STEPS", "8")),
             max_tool_calls=int(os.getenv("HARNESS_MAX_TOOL_CALLS", "20")),
             max_repeated_steps=int(os.getenv("HARNESS_MAX_REPEATED_STEPS", "2")),
-            max_repeated_tool_calls=int(
-                os.getenv("HARNESS_MAX_REPEATED_TOOL_CALLS", "2")
+            max_repeated_tool_calls=int(os.getenv("HARNESS_MAX_REPEATED_TOOL_CALLS", "3")),
+            min_dynamic_call_interval_seconds=float(
+                os.getenv("HARNESS_MIN_DYNAMIC_CALL_INTERVAL_SEC", "5")
             ),
-            max_no_progress_steps=int(
-                os.getenv("HARNESS_MAX_NO_PROGRESS_STEPS", "2")
-            ),
-            graph_recursion_limit=int(
-                os.getenv("HARNESS_GRAPH_RECURSION_LIMIT", "32")
-            ),
+            max_no_progress_steps=int(os.getenv("HARNESS_MAX_NO_PROGRESS_STEPS", "2")),
+            graph_recursion_limit=int(os.getenv("HARNESS_GRAPH_RECURSION_LIMIT", "32")),
         )
 
 

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import BaseModel
 
 from app.agent.aiops.executor import executor
 from app.harness.config import HarnessSettings
-from app.harness.loop_guard import LoopGuard, LoopGuardPolicy
+from app.harness.loop_guard import LoopGuard, LoopGuardPolicy, tool_fingerprint
 from app.harness.repository import HarnessRepository
 from app.harness.runtime import HarnessRunContext, harness_run_context
 from app.harness.tool_gateway import ToolExecutionError, ToolGateway, ToolPolicy
@@ -44,14 +45,12 @@ def test_step_guard_blocks_limit_repeat_and_no_progress() -> None:
         )
     )
 
-    max_steps = guard.evaluate_step(
-        "another step", [("a", "1"), ("b", "2"), ("c", "3")]
-    )
+    max_steps = guard.evaluate_step("another step", [("a", "1"), ("b", "2"), ("c", "3")])
     assert max_steps.reason == "max_steps"
 
     repeated = guard.evaluate_step(
         "Query MATLAB logs!",
-        [("query matlab logs", "first"), ("QUERY MATLAB LOGS", "second")],
+        [("query matlab logs", "same"), ("QUERY MATLAB LOGS", "same")],
     )
     assert repeated.reason == "repeated_step"
 
@@ -60,6 +59,137 @@ def test_step_guard_blocks_limit_repeat_and_no_progress() -> None:
         [("first", "未找到相关数据"), ("second", "执行失败: connection")],
     )
     assert no_progress.reason == "no_progress"
+
+
+def _observed_step(tool_name: str, facts: dict, summary: str = "observed") -> dict:
+    return {
+        "schema": "tool_result.v1",
+        "status": "success",
+        "summary": summary,
+        "key_facts": {"tools": [{"tool_name": tool_name, "status": "success", "key_facts": facts}]},
+    }
+
+
+def test_snapshot_progress_ignores_small_fluctuations_and_timestamps() -> None:
+    guard = LoopGuard(LoopGuardPolicy(max_no_progress_steps=2))
+    steps = [
+        (
+            "cpu",
+            _observed_step(
+                "query_cpu_metrics",
+                {
+                    "service_name": "matlab",
+                    "current_cpu_percent": 42,
+                    "alert_info": {"threshold": 80, "triggered": False},
+                },
+            ),
+        ),
+        (
+            "cpu 2",
+            _observed_step(
+                "query_cpu_metrics",
+                {
+                    "service_name": "matlab",
+                    "current_cpu_percent": 43,
+                    "alert_info": {"threshold": 80, "triggered": False},
+                    "timestamp": "new sample",
+                },
+            ),
+        ),
+        (
+            "cpu 3",
+            _observed_step(
+                "query_cpu_metrics",
+                {
+                    "service_name": "matlab",
+                    "current_cpu_percent": 96,
+                    "alert_info": {"threshold": 80, "triggered": True},
+                },
+            ),
+        ),
+    ]
+    assert guard.evaluate_step("next", steps).allowed
+    steps.extend(
+        [
+            (
+                "cpu 4",
+                _observed_step(
+                    "query_cpu_metrics",
+                    {
+                        "service_name": "matlab",
+                        "current_cpu_percent": 97,
+                        "alert_info": {"threshold": 80, "triggered": True},
+                    },
+                ),
+            ),
+            (
+                "cpu 5",
+                _observed_step(
+                    "query_cpu_metrics",
+                    {
+                        "service_name": "matlab",
+                        "current_cpu_percent": 96,
+                        "alert_info": {"threshold": 80, "triggered": True},
+                    },
+                ),
+            ),
+        ]
+    )
+    assert guard.evaluate_step("next", steps).reason == "no_progress"
+
+
+def test_log_evidence_ids_detect_new_lines_despite_changing_summary() -> None:
+    guard = LoopGuard(LoopGuardPolicy(max_no_progress_steps=2))
+    steps = [
+        ("logs 1", _observed_step("search_log", {"query": "MATLAB", "log_ids": ["a"]}, "found 1")),
+        (
+            "logs 2",
+            _observed_step("search_log", {"query": "MATLAB", "log_ids": ["a"]}, "found 1 again"),
+        ),
+        (
+            "logs 3",
+            _observed_step("search_log", {"query": "MATLAB", "log_ids": ["a", "b"]}, "found 2"),
+        ),
+    ]
+    assert guard.evaluate_step("next", steps).allowed
+    steps.append(
+        ("logs 4", _observed_step("search_log", {"query": "MATLAB", "log_ids": ["a", "b"]}))
+    )
+    steps.append(
+        ("logs 5", _observed_step("search_log", {"query": "MATLAB", "log_ids": ["a", "b"]}))
+    )
+    assert guard.evaluate_step("next", steps).reason == "no_progress"
+
+
+def test_dynamic_same_arguments_use_interval_not_lifetime_cap() -> None:
+    guard = LoopGuard(LoopGuardPolicy(max_tool_calls=20, min_dynamic_call_interval_seconds=5))
+    old_at = (datetime.now(UTC) - timedelta(seconds=8)).isoformat()
+    calls = [
+        {
+            "tool_name": "query_cpu_metrics",
+            "arguments": {"service_name": "matlab"},
+            "finished_at": old_at,
+        }
+        for _ in range(3)
+    ]
+    assert guard.evaluate_tool_call("query_cpu_metrics", {"service_name": "matlab"}, calls).allowed
+    calls[-1]["finished_at"] = datetime.now(UTC).isoformat()
+    assert (
+        guard.evaluate_tool_call("query_cpu_metrics", {"service_name": "matlab"}, calls).reason
+        == "dynamic_tool_interval"
+    )
+    assert guard.evaluate_tool_call("query_cpu_metrics", {"service_name": "other"}, calls).allowed
+    assert tool_fingerprint("query_cpu_metrics", {"a": 1, "b": 2}) == tool_fingerprint(
+        "query_cpu_metrics", {"b": 2, "a": 1}
+    )
+
+
+def test_static_same_arguments_allow_three_calls_by_default() -> None:
+    guard = LoopGuard(LoopGuardPolicy())
+    calls = [{"tool_name": "echo", "arguments": {"query": "same"}} for _ in range(2)]
+    assert guard.evaluate_tool_call("echo", {"query": "same"}, calls).allowed
+    calls.append({"tool_name": "echo", "arguments": {"query": "same"}})
+    assert guard.evaluate_tool_call("echo", {"query": "same"}, calls).reason == "repeated_tool_call"
 
 
 @pytest.mark.asyncio
@@ -71,8 +201,8 @@ async def test_executor_stops_repeated_step_before_llm_call(tmp_path) -> None:
         "input": "diagnose",
         "plan": ["Query MATLAB logs!"],
         "past_steps": [
-            ("query matlab logs", "first evidence"),
-            ("QUERY MATLAB LOGS", "second evidence"),
+            ("query matlab logs", "same evidence"),
+            ("QUERY MATLAB LOGS", "same evidence"),
         ],
         "response": "",
         "steps_summary": "",
@@ -99,12 +229,8 @@ async def test_tool_guard_blocks_third_identical_call_and_records_event(tmp_path
     run = repository.create_run(task="repeat tools", session_id="loop-tool")
     repository.claim_next_run("worker", lease_seconds=30)
     tool = EchoTool()
-    guard = LoopGuard(
-        LoopGuardPolicy(max_tool_calls=10, max_repeated_tool_calls=2)
-    )
-    gateway = ToolGateway(
-        {"echo": ToolPolicy(timeout_seconds=1, max_retries=0)}, guard=guard
-    )
+    guard = LoopGuard(LoopGuardPolicy(max_tool_calls=10, max_repeated_tool_calls=2))
+    gateway = ToolGateway({"echo": ToolPolicy(timeout_seconds=1, max_retries=0)}, guard=guard)
 
     with harness_run_context(HarnessRunContext(run["id"], repository)):
         for step_index in range(2):

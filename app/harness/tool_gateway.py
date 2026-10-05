@@ -69,6 +69,15 @@ def _prepared_result(tool_name: str, result: Any) -> tuple[str, dict[str, Any] |
         content_value = content_value[0]
 
     safe_value = _safe_json(content_value)
+    # MCP adapters commonly expose a JSON object as text. Parse it before
+    # normalizing so monitoring snapshots retain comparable key_facts.
+    if isinstance(safe_value, str):
+        try:
+            parsed = json.loads(safe_value)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            safe_value = parsed
     structured = normalize_tool_result(tool_name, safe_value)
     if structured is None:
         return _result_text(result), None
@@ -145,19 +154,26 @@ class ToolGateway:
             existing_calls = await asyncio.to_thread(
                 context.repository.list_tool_calls, context.run_id
             )
-            guard_decision = self.loop_guard.evaluate_tool_call(
-                tool_name, validated, existing_calls
+            # Replaying the same call in one step is an idempotent cache hit,
+            # not a new observation and must not trip the sampling interval.
+            cached_in_step = any(
+                call.get("idempotency_key") == idempotency_key and call.get("status") == "succeeded"
+                for call in existing_calls
             )
-            if not guard_decision.allowed:
-                payload = guard_decision.event_payload("tool_call")
-                await asyncio.to_thread(
-                    context.repository.append_event,
-                    context.run_id,
-                    "loop_guard_triggered",
-                    payload,
+            if not cached_in_step:
+                guard_decision = self.loop_guard.evaluate_tool_call(
+                    tool_name, validated, existing_calls
                 )
-                code = f"LOOP_GUARD_{str(guard_decision.reason).upper()}"
-                raise ToolExecutionError(code, guard_decision.message, retryable=False)
+                if not guard_decision.allowed:
+                    payload = guard_decision.event_payload("tool_call")
+                    await asyncio.to_thread(
+                        context.repository.append_event,
+                        context.run_id,
+                        "loop_guard_triggered",
+                        payload,
+                    )
+                    code = f"LOOP_GUARD_{str(guard_decision.reason).upper()}"
+                    raise ToolExecutionError(code, guard_decision.message, retryable=False)
 
             call_row, cached = await asyncio.to_thread(
                 context.repository.begin_tool_call,
