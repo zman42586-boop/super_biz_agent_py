@@ -3,6 +3,7 @@ Planner 节点：制定执行计划
 基于 LangGraph 官方教程实现
 """
 
+import asyncio
 from textwrap import dedent
 from typing import Any
 
@@ -14,9 +15,12 @@ from app.agent.mcp_client import get_mcp_tools_with_circuit_breaker
 from app.claude_skills import load_skills_description
 from app.core.llm_factory import llm_factory
 from app.harness.config import harness_settings
+from app.harness.repository import LeaseLostError
+from app.harness.runtime import ensure_run_ownership, get_run_context
 from app.memory import load_memory_context
 from app.tools import get_current_time, retrieve_knowledge, search_log
 from app.tools.catalog import format_tool_catalog
+from app.tools.host_history import available_tools, offline_notice
 from app.utils.token_meter import log_token_budget
 
 from .state import PlanExecuteState
@@ -86,6 +90,7 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
     1. 先查询内部文档，获取相关经验和最佳实践
     2. 基于经验文档和可用工具制定执行计划
     """
+    await ensure_run_ownership()
     logger.info("=== Planner：制定执行计划 ===")
 
     input_text = state.get("input", "")
@@ -115,11 +120,21 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
             # retrieve_knowledge 使用 response_format="content_and_artifact"
             # ainvoke() 只返回 content（字符串），不是元组
             context_str = await retrieve_knowledge.ainvoke({"query": input_text, "mode": "plan"})
+            context = get_run_context()
+            if context and context.offline_host:
+                await asyncio.to_thread(
+                    context.repository.append_event,
+                    context.run_id,
+                    "planner_retrieval",
+                    {"content": (context_str or "")[:8000]},
+                )
             if context_str and context_str.strip():
                 experience_docs = context_str
                 logger.info(f"找到相关经验文档，长度: {len(experience_docs)}")
             else:
                 logger.info("未找到相关经验文档")
+        except LeaseLostError:
+            raise
         except Exception as e:
             logger.warning(f"查询内部文档失败: {e}")
 
@@ -133,7 +148,11 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
 
         # 获取 MCP 工具（失败时降级为仅本地工具）
         try:
-            mcp_tools = await get_mcp_tools_with_circuit_breaker()
+            local_tools, mcp_tools = await available_tools(
+                local_tools, get_mcp_tools_with_circuit_breaker
+            )
+        except LeaseLostError:
+            raise
         except Exception as e:
             logger.warning(f"获取 MCP 工具失败: {e}")
             mcp_tools = []
@@ -143,7 +162,7 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
         logger.info(f"可用工具数量: 本地 {len(local_tools)} + MCP {len(mcp_tools)}")
 
         # 渐进式披露：Planner 只看到领域、名称和短摘要，不注入参数 Schema/长描述。
-        tools_description = format_tool_catalog(all_tools)
+        tools_description = format_tool_catalog(all_tools) + offline_notice()
 
         # 步骤2.5: 从 .claude/skills/*.md 加载 Skill 描述（Claude Code 风格）
         skills_description = load_skills_description()
@@ -184,6 +203,7 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
         )
 
         # 调用 LLM 生成计划
+        await ensure_run_ownership()
         plan_result = await planner_chain.ainvoke(
             {
                 "messages": [("user", input_text)],
@@ -214,6 +234,8 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
 
         return {"plan": plan_steps}
 
+    except LeaseLostError:
+        raise
     except Exception as e:
         logger.error(f"生成计划失败: {e}", exc_info=True)
         # 返回一个默认计划

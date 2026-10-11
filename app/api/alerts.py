@@ -92,15 +92,22 @@ async def resolve_alert(alert_id: str) -> AlertRecord:
 
 
 class HeartbeatRequest(BaseModel):
-    """Agent 进程心跳上报请求体——携带系统状态供死因分析"""
-    host: str = Field(description="主机名，用于标识上报来源")
+    """Agent 心跳上报：轻量系统指标，日志通过独立接口上传。"""
+
+    host: str = Field(min_length=1, max_length=128, description="主机名，用于标识上报来源")
     temperature: float | None = Field(default=None, description="当前温度 (°C)")
     temp_threshold: float | None = Field(default=None, description="告警阈值 (°C)")
-    recent_points: list = Field(default_factory=list, description="最近温度数据点 [[ts, val], ...]")
+    recent_points: list = Field(
+        default_factory=list, max_length=10, description="最近温度数据点 [[ts, val], ...]"
+    )
     cpu_percent: float | None = Field(default=None, description="当前 CPU 使用率 %")
     memory_percent: float | None = Field(default=None, description="当前内存使用率 %")
-    top_processes: list = Field(default_factory=list, description="TOP 进程列表 [{name, cpu, memory}, ...]")
-    critical_snapshot: dict | None = Field(default=None, description="温度危险时的完整系统快照 (CPU/内存/进程)")
+    top_processes: list = Field(
+        default_factory=list, max_length=5, description="TOP 进程列表 [{name, cpu, memory}, ...]"
+    )
+    critical_snapshot: dict | None = Field(
+        default=None, description="温度危险时的完整系统快照 (CPU/内存/进程)"
+    )
 
 
 @router.post(
@@ -112,10 +119,34 @@ async def heartbeat(req: HeartbeatRequest) -> dict:
     """Agent 进程定期调用此接口告知主服务"我还活着"。
 
     - 服务端记录每个主机的最近心跳时间和系统快照
-    - 超过 oncall_heartbeat_timeout_sec 秒未收到心跳 → 自动宕机告警
-    - 宕机告警会包含最后心跳的温度/CPU/进程数据，用于推断死因
-    - 心跳恢复后自动 resolve 宕机告警
+    - 超过阈值未收到心跳，持久化失联告警和降级诊断任务
+    - 心跳失联不能证明主机已经物理宕机
+    - 心跳恢复后自动解除失联告警
     """
     snapshot = req.model_dump(exclude={"host"})
-    alert_service.record_heartbeat(req.host, snapshot)
+    await alert_service.record_heartbeat(req.host, snapshot)
+    return {"status": "ok", "host": req.host}
+
+
+class KeyLogEntry(BaseModel):
+    event_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
+    source: str = Field(default="MATLAB", max_length=256)
+    offset: int = Field(default=0, ge=0)
+    ts: str | None = Field(default=None, max_length=64)
+    text: str = Field(min_length=1, max_length=16384)
+
+
+class KeyLogRequest(BaseModel):
+    host: str = Field(min_length=1, max_length=128)
+    entries: list[KeyLogEntry] = Field(max_length=100)
+
+
+@router.post(
+    "/host-logs", dependencies=[Depends(_verify_token)], summary="增量上传 MATLAB 关键日志"
+)
+async def host_logs(req: KeyLogRequest):
+    try:
+        await alert_service.record_logs(req.host, [entry.model_dump() for entry in req.entries])
+    except ValueError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     return {"status": "ok", "host": req.host}

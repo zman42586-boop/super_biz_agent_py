@@ -145,6 +145,12 @@ class ToolGateway:
         policy = self.policies.get(tool_name, ToolPolicy())
         validated = _validate_arguments(tool, arguments)
         context = get_run_context()
+        if (
+            context
+            and context.offline_host
+            and tool_name not in {"read_host_history", "retrieve_knowledge", "get_current_time"}
+        ):
+            raise ToolExecutionError("TOOL_UNAVAILABLE", f"{tool_name} unavailable: host offline")
         idempotency_key = self._idempotency_key(
             context.run_id if context else "adhoc", step_index, tool_name, validated
         )
@@ -154,6 +160,25 @@ class ToolGateway:
             existing_calls = await asyncio.to_thread(
                 context.repository.list_tool_calls, context.run_id
             )
+            if not policy.read_only and any(
+                call.get("idempotency_key") == idempotency_key
+                and call.get("status") in {"running", "failed", "retrying"}
+                for call in existing_calls
+            ):
+                await asyncio.to_thread(
+                    context.repository.append_event,
+                    context.run_id,
+                    "external_tool_replay_blocked",
+                    {
+                        "tool_name": tool_name,
+                        "version": context.version,
+                        "potential_duplicate_execution": True,
+                    },
+                )
+                raise ToolExecutionError(
+                    "TOOL_EXECUTION_UNCERTAIN",
+                    "Verify the previous external operation before replay",
+                )
             # Replaying the same call in one step is an idempotent cache hit,
             # not a new observation and must not trip the sampling interval.
             cached_in_step = any(
@@ -195,22 +220,45 @@ class ToolGateway:
                     structured_content=result.get("structured_content"),
                 )
 
-        attempts = max(1, policy.max_retries + 1)
+        # A non-read-only request may have succeeded despite a lost response.
+        attempts = max(1, policy.max_retries + 1) if policy.read_only else 1
         total_started = time.perf_counter()
         last_error: ToolExecutionError | None = None
         call_id = int(call_row["id"]) if call_row else None
 
         for attempt in range(1, attempts + 1):
+            if context is not None:
+                owned = await asyncio.to_thread(
+                    context.repository.check_ownership,
+                    context.run_id,
+                    context.worker_id,
+                    context.version,
+                )
+                if not owned:
+                    from app.harness.repository import LeaseLostError
+
+                    raise LeaseLostError("Lost lease before tool invocation")
             started = time.perf_counter()
             try:
                 raw_result = await asyncio.wait_for(
                     self._invoke(tool, validated), timeout=policy.timeout_seconds
                 )
+                if context is not None and not await asyncio.to_thread(
+                    context.repository.check_ownership,
+                    context.run_id,
+                    context.worker_id,
+                    context.version,
+                ):
+                    from app.harness.repository import LeaseLostError
+
+                    raise LeaseLostError(
+                        "Lost lease during tool invocation; remote execution may have completed"
+                    )
                 result_text, structured_content = _prepared_result(tool_name, raw_result)
                 content, artifact_path, structured_content = await asyncio.to_thread(
                     self._limit_result,
                     context.run_id if context else "adhoc",
-                    idempotency_key,
+                    f"{idempotency_key}:version:{context.version}" if context else idempotency_key,
                     result_text,
                     policy.max_output_chars,
                     structured_content,
@@ -236,6 +284,10 @@ class ToolGateway:
                     structured_content=structured_content,
                 )
             except BaseException as exc:
+                from app.harness.repository import LeaseLostError
+
+                if isinstance(exc, LeaseLostError):
+                    raise
                 if isinstance(exc, asyncio.CancelledError):
                     raise
                 last_error = _classify_error(exc)

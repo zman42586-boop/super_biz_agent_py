@@ -86,3 +86,10 @@ tests/.last_eval_score
 # Local evaluation reports and scratch scripts
 work/
 
+# Local diagnostic evidence can contain sensitive host data
+/memory/artifacts/
+/memory/emergency/
+/memory/incidents/
+*.dmp
+matlab_crash_dump.*
+

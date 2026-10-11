@@ -12,7 +12,7 @@ from typing import Any
 from loguru import logger
 
 from app.harness.config import HarnessSettings, harness_settings
-from app.harness.repository import HarnessRepository, get_harness_repository
+from app.harness.repository import HarnessRepository, LeaseLostError, get_harness_repository
 from app.harness.runtime import HarnessRunContext, harness_run_context
 
 RunExecutor = Callable[[dict[str, Any]], AsyncIterator[dict[str, Any]]]
@@ -41,148 +41,170 @@ class HarnessWorker:
         self.executor = executor or self._execute_aiops_run
         self._stopping = asyncio.Event()
 
-    async def run_forever(self) -> None:
-        recovered = await asyncio.to_thread(self.repository.recover_stale_runs)
-        if recovered:
-            logger.warning(f"[Harness] recovered {recovered} stale run(s)")
-        logger.info(f"[Harness] worker started: {self.worker_id}")
+    async def _maintenance(self) -> None:
+        from app.harness.notifications import dispatch_notifications
+
         while not self._stopping.is_set():
-            worked = await self.run_once()
-            if not worked:
+            try:
+                recovered = await asyncio.to_thread(self.repository.recover_stale_runs)
+                if recovered:
+                    logger.warning(f"[Harness] recovered {recovered} stale run(s)")
+                await dispatch_notifications(self.repository)
+            except Exception:
+                logger.exception("[Harness] maintenance failed; will retry")
+            try:
+                await asyncio.wait_for(
+                    self._stopping.wait(),
+                    timeout=max(0.01, self.settings.recovery_interval_seconds),
+                )
+            except TimeoutError:
+                pass
+
+    async def run_forever(self) -> None:
+        logger.info(f"[Harness] worker started: {self.worker_id}")
+        maintenance = asyncio.create_task(self._maintenance())
+        try:
+            while not self._stopping.is_set():
                 try:
-                    await asyncio.wait_for(
-                        self._stopping.wait(), timeout=self.settings.poll_interval_seconds
-                    )
-                except TimeoutError:
-                    pass
+                    worked = await self.run_once()
+                except Exception:
+                    logger.exception("[Harness] polling failed; will retry")
+                    worked = False
+                if not worked:
+                    try:
+                        await asyncio.wait_for(
+                            self._stopping.wait(),
+                            timeout=max(0.01, self.settings.poll_interval_seconds),
+                        )
+                    except TimeoutError:
+                        pass
+        finally:
+            maintenance.cancel()
+            await asyncio.gather(maintenance, return_exceptions=True)
 
     def stop(self) -> None:
         self._stopping.set()
 
     async def run_once(self) -> bool:
         run = await asyncio.to_thread(
-            self.repository.claim_next_run,
-            self.worker_id,
-            self.settings.lease_seconds,
+            self.repository.claim_next_run, self.worker_id, self.settings.lease_seconds
         )
         if run is None:
             return False
-
         run_id = str(run["id"])
-        heartbeat_stop = asyncio.Event()
-        heartbeat_task = asyncio.create_task(
-            self._lease_heartbeat(run_id, heartbeat_stop)
+        offline = run.get("kind") == "host_down_diagnosis"
+        context = HarnessRunContext(
+            run_id,
+            self.repository,
+            self.worker_id,
+            run["version"],
+            (run.get("input") or {}).get("host") if offline else None,
+            (run.get("input") or {}).get("history") if offline else None,
         )
-        try:
-            async with asyncio.timeout(max(0.001, self.settings.run_timeout_seconds)):
-                await self._execute_claimed_run(run)
-            return True
-        except asyncio.CancelledError:
-            raise
-        except TimeoutError:
-            payload = {
-                "scope": "run",
-                "reason": "run_timeout",
-                "message": "Run exceeded its total execution time budget.",
-                "limit_seconds": self.settings.run_timeout_seconds,
-            }
-            logger.error(f"[LoopGuard] run timed out: {run_id}")
-            await asyncio.to_thread(
-                self.repository.append_event,
-                run_id,
-                "loop_guard_triggered",
-                payload,
+        heartbeat_stop, lost = asyncio.Event(), asyncio.Event()
+        with harness_run_context(context):
+            execution = asyncio.create_task(self._execute_claimed_run(run))
+            heartbeat = asyncio.create_task(
+                self._lease_heartbeat(run, heartbeat_stop, lost, execution)
             )
-            await asyncio.to_thread(
-                self.repository.fail_run,
-                run_id,
-                "RUN_TIMEOUT",
-                payload["message"],
-            )
-            return True
-        except RunExecutionError as exc:
-            if exc.code == "GRAPH_RECURSION_LIMIT":
-                await asyncio.to_thread(
-                    self.repository.append_event,
-                    run_id,
-                    "loop_guard_triggered",
-                    {
-                        "scope": "graph",
-                        "reason": "graph_recursion_limit",
-                        "message": str(exc),
-                        "limit": self.settings.graph_recursion_limit,
-                    },
+            try:
+                async with asyncio.timeout(max(0.001, self.settings.run_timeout_seconds)):
+                    await execution
+            except asyncio.CancelledError:
+                if not lost.is_set():
+                    raise
+                logger.warning(f"[Harness] execution stopped after lease loss: {run_id}")
+            except LeaseLostError:
+                logger.warning(f"[Harness] stale writer rejected: {run_id}")
+            except Exception as exc:
+                code = (
+                    "RUN_TIMEOUT"
+                    if isinstance(exc, TimeoutError)
+                    else exc.code
+                    if isinstance(exc, RunExecutionError)
+                    else "RUN_EXECUTION_FAILED"
                 )
-            logger.error(f"[Harness] run failed: {run_id}: {exc}")
-            await asyncio.to_thread(
-                self.repository.fail_run,
-                run_id,
-                exc.code,
-                str(exc),
-            )
-            return True
-        except Exception as exc:
-            logger.exception(f"[Harness] run failed: {run_id}: {exc}")
-            await asyncio.to_thread(
-                self.repository.fail_run,
-                run_id,
-                "RUN_EXECUTION_FAILED",
-                str(exc),
-            )
-            return True
-        finally:
-            heartbeat_stop.set()
-            await heartbeat_task
+                try:
+                    if code in {"RUN_TIMEOUT", "GRAPH_RECURSION_LIMIT"}:
+                        await asyncio.to_thread(
+                            self.repository.append_event,
+                            run_id,
+                            "loop_guard_triggered",
+                            {
+                                "scope": "run" if code == "RUN_TIMEOUT" else "graph",
+                                "reason": "run_timeout"
+                                if code == "RUN_TIMEOUT"
+                                else "graph_recursion_limit",
+                                "limit": self.settings.run_timeout_seconds
+                                if code == "RUN_TIMEOUT"
+                                else self.settings.graph_recursion_limit,
+                            },
+                        )
+                    await asyncio.to_thread(self.repository.fail_run, run_id, code, str(exc))
+                except LeaseLostError:
+                    logger.warning(f"[Harness] stale failure rejected: {run_id}")
+            finally:
+                heartbeat_stop.set()
+                await heartbeat
+        from app.harness.notifications import dispatch_notifications
+
+        await dispatch_notifications(self.repository)
+        return True
 
     async def _execute_claimed_run(self, run: dict[str, Any]) -> None:
         run_id = str(run["id"])
-        context = HarnessRunContext(run_id=run_id, repository=self.repository)
-        with harness_run_context(context):
-            async for event in self.executor(run):
-                await asyncio.to_thread(
-                    self.repository.append_event,
-                    run_id,
-                    str(event.get("type", "agent_event")),
-                    event,
+        async for event in self.executor(run):
+            await asyncio.to_thread(
+                self.repository.append_event, run_id, str(event.get("type", "agent_event")), event
+            )
+            if event.get("type") == "error":
+                raise RunExecutionError(
+                    str(event.get("error_code") or "RUN_EXECUTION_FAILED"),
+                    str(event.get("message", "Agent execution failed")),
                 )
-                if await asyncio.to_thread(self.repository.is_cancelled, run_id):
-                    logger.info(f"[Harness] run cancelled: {run_id}")
-                    return
-                if event.get("type") == "error":
-                    raise RunExecutionError(
-                        str(event.get("error_code") or "RUN_EXECUTION_FAILED"),
-                        str(event.get("message", "Agent execution failed")),
+            if event.get("type") == "complete":
+                report = str(
+                    event.get("response") or (event.get("diagnosis") or {}).get("report") or ""
+                )
+                if not report:
+                    raise RunExecutionError("EMPTY_REPORT", "Agent returned no report")
+                if run.get("kind") == "host_down_diagnosis" and not event.get(
+                    "host_report_finalized"
+                ):
+                    from app.harness.host_report import format_host_report
+
+                    report = await asyncio.to_thread(
+                        format_host_report, run, report, self.repository
                     )
-                if event.get("type") == "complete":
-                    report = str(
-                        event.get("response")
-                        or (event.get("diagnosis") or {}).get("report")
-                        or ""
-                    )
-                    await self._deliver_alert_report(run, report)
-                    await asyncio.to_thread(self.repository.finish_run, run_id, report)
-                    logger.info(f"[Harness] run succeeded: {run_id}")
-                    return
+                await asyncio.to_thread(self.repository.finish_run, run_id, report)
+                logger.info(f"[Harness] run succeeded: {run_id}")
+                return
         raise RunExecutionError(
             "RUN_EXECUTION_FAILED", "Agent stream ended without a complete event"
         )
 
-    async def _lease_heartbeat(self, run_id: str, stopping: asyncio.Event) -> None:
-        interval = max(1.0, self.settings.lease_seconds / 3)
+    async def _lease_heartbeat(self, run, stopping, lost, execution) -> None:
+        interval = max(0.05, self.settings.lease_seconds / 3)
         while not stopping.is_set():
             try:
                 await asyncio.wait_for(stopping.wait(), timeout=interval)
-                break
+                return
             except TimeoutError:
-                renewed = await asyncio.to_thread(
-                    self.repository.renew_lease,
-                    run_id,
-                    self.worker_id,
-                    self.settings.lease_seconds,
-                )
+                try:
+                    renewed = await asyncio.to_thread(
+                        self.repository.renew_lease,
+                        run["id"],
+                        self.worker_id,
+                        self.settings.lease_seconds,
+                        run["version"],
+                    )
+                except Exception:
+                    logger.exception("[Harness] renewal failed; stop execution conservatively")
+                    renewed = False
                 if not renewed:
-                    logger.warning(f"[Harness] lease no longer owned: {run_id}")
-                    break
+                    lost.set()
+                    execution.cancel()
+                    return
 
     @staticmethod
     async def _execute_aiops_run(run: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
@@ -220,27 +242,6 @@ class HarnessWorker:
             execution_id=execution_id,
         ):
             yield event
-
-    async def _deliver_alert_report(self, run: dict[str, Any], report: str) -> None:
-        """Send the diagnosis email before marking an alert Run successful."""
-        if run.get("kind") != "alert_diagnosis":
-            return
-
-        from app.models.alert import AlertRecord
-        from app.services.alert_service import send_diagnosis_report_email
-
-        alert_payload = (run.get("input") or {}).get("alert")
-        if not alert_payload:
-            raise ValueError("alert_diagnosis Run is missing input.alert")
-        alert = AlertRecord.model_validate(alert_payload)
-        alert.diagnosis_report = report
-        await send_diagnosis_report_email(alert, report)
-        await asyncio.to_thread(
-            self.repository.append_event,
-            str(run["id"]),
-            "alert_diagnosis_email_sent",
-            {"alert_id": alert.alert_id},
-        )
 
 
 async def run_worker() -> None:

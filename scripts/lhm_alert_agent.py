@@ -31,24 +31,27 @@ import glob as glob_mod
 import json
 import os
 import socket
+import sys
+import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 try:
     import requests
 except ImportError:
-    raise SystemExit("缺少 requests 库，请运行: pip install requests")
+    raise SystemExit("缺少 requests 库，请运行: pip install requests") from None
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 except ImportError:
     pass
 
 try:
     import psutil
+
     HAS_PSUTIL = True
 except ImportError:
     HAS_PSUTIL = False
@@ -73,6 +76,13 @@ HOST_NAME = socket.gethostname()
 EMERGENCY_SNAPSHOT_DIR = Path(__file__).resolve().parents[1] / "memory" / "emergency"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+sys.path.insert(0, str(PROJECT_ROOT))
+from app.harness.log_collector import IncrementalLogCollector  # noqa: E402
+
+HEARTBEAT_INTERVAL_SEC = max(0.1, float(os.getenv("HEARTBEAT_INTERVAL_SEC", "5")))
+MATLAB_LOG_GLOBS = [p.strip() for p in os.getenv("MATLAB_LOG_GLOBS", "").split(";") if p.strip()]
+MATLAB_LOG_INTERVAL_SEC = max(0.1, float(os.getenv("MATLAB_LOG_INTERVAL_SEC", "2")))
+
 # 心跳状态
 _last_heartbeat_ok = True
 
@@ -84,6 +94,7 @@ EMERGENCY_SNAPSHOT_TEMP_C = float(os.getenv("EMERGENCY_SNAPSHOT_TEMP_C", "85"))
 # ║                        LHM 温度数据解析                                      ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
+
 def _find_sensors(node: dict, name_contains: str, results: list) -> None:
     """递归遍历 LHM data.json 节点，收集匹配的温度传感器。"""
     children = node.get("Children", [])
@@ -94,11 +105,13 @@ def _find_sensors(node: dict, name_contains: str, results: list) -> None:
         try:
             raw_value = node.get("Value", "0")
             value = float(str(raw_value).split()[0].replace(",", "."))
-            results.append({
-                "id": node.get("id", ""),
-                "name": name,
-                "value": value,
-            })
+            results.append(
+                {
+                    "id": node.get("id", ""),
+                    "name": name,
+                    "value": value,
+                }
+            )
         except (ValueError, IndexError):
             pass
 
@@ -106,7 +119,7 @@ def _find_sensors(node: dict, name_contains: str, results: list) -> None:
         _find_sensors(child, name_contains, results)
 
 
-def fetch_temperature(name_contains: str) -> Optional[dict]:
+def fetch_temperature(name_contains: str) -> dict | None:
     """从 LHM Web API 拉取目标温度传感器当前值。"""
     url = f"{LHM_BASE_URL}/data.json"
     try:
@@ -128,6 +141,7 @@ def fetch_temperature(name_contains: str) -> Optional[dict]:
 # ║                        进程监控模块                                         ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
+
 def find_process(name: str) -> dict | None:
     """用进程名查找进程，返回 {pid, name, cpu_percent, memory_percent} 或 None。"""
     if not name or not HAS_PSUTIL:
@@ -139,7 +153,9 @@ def find_process(name: str) -> dict | None:
                     "pid": proc.info["pid"],
                     "name": proc.info["name"],
                     "cpu_percent": proc.info["cpu_percent"] or 0,
-                    "memory_percent": round(proc.info["memory_percent"] or 0, 1) if proc.info["memory_percent"] else 0,
+                    "memory_percent": round(proc.info["memory_percent"] or 0, 1)
+                    if proc.info["memory_percent"]
+                    else 0,
                 }
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
@@ -149,6 +165,7 @@ def find_process(name: str) -> dict | None:
 def _expand_crash_dir(path_template: str) -> str:
     """展开环境变量 %VAR% 到实际路径（Windows 兼容）。"""
     import re
+
     result = path_template
     for match in re.finditer(r"%(\w+)%", path_template):
         var_name = match.group(1)
@@ -190,7 +207,11 @@ def parse_crash_dump(filepath: str) -> dict:
         with open(filepath, encoding="utf-8", errors="replace") as f:
             raw = f.read()
     except OSError:
-        return {"crash_type": "read_error", "stack_trace": "", "raw_snippet": f"无法读取: {filepath}"}
+        return {
+            "crash_type": "read_error",
+            "stack_trace": "",
+            "raw_snippet": f"无法读取: {filepath}",
+        }
 
     raw_header = raw[:3000] if len(raw) > 3000 else raw
 
@@ -240,7 +261,7 @@ def parse_crash_dump(filepath: str) -> dict:
 def collect_system_snapshot() -> dict:
     """采集当前系统快照（始终可用，不依赖温度阈值）。"""
     snapshot: dict = {
-        "timestamp": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "timestamp": datetime.now(UTC).astimezone().isoformat(timespec="seconds"),
         "host": HOST_NAME,
     }
     if HAS_PSUTIL:
@@ -248,8 +269,8 @@ def collect_system_snapshot() -> dict:
             snapshot["cpu_percent"] = round(psutil.cpu_percent(interval=0.5), 1)
             vm = psutil.virtual_memory()
             snapshot["memory_percent"] = round(vm.percent, 1)
-            snapshot["memory_used_gb"] = round(vm.used / (1024 ** 3), 2)
-            snapshot["memory_total_gb"] = round(vm.total / (1024 ** 3), 2)
+            snapshot["memory_used_gb"] = round(vm.used / (1024**3), 2)
+            snapshot["memory_total_gb"] = round(vm.total / (1024**3), 2)
             top_procs = []
             for proc in sorted(
                 psutil.process_iter(["name", "cpu_percent", "memory_percent"]),
@@ -257,11 +278,13 @@ def collect_system_snapshot() -> dict:
                 reverse=True,
             )[:10]:
                 try:
-                    top_procs.append({
-                        "name": proc.info["name"],
-                        "cpu": round(proc.info["cpu_percent"] or 0, 1),
-                        "memory": round(proc.info["memory_percent"] or 0, 1),
-                    })
+                    top_procs.append(
+                        {
+                            "name": proc.info["name"],
+                            "cpu": round(proc.info["cpu_percent"] or 0, 1),
+                            "memory": round(proc.info["memory_percent"] or 0, 1),
+                        }
+                    )
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
             snapshot["top_processes"] = top_procs
@@ -285,10 +308,14 @@ def write_light_snapshot(snapshot: dict) -> None:
 # ║                        心跳上报                                            ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
-def send_heartbeat(temp: float | None, recent_points: list,
-                   cpu_pct: float | None = None,
-                   mem_pct: float | None = None,
-                   top_procs: list | None = None) -> bool:
+
+def send_heartbeat(
+    temp: float | None,
+    recent_points: list,
+    cpu_pct: float | None = None,
+    mem_pct: float | None = None,
+    top_procs: list | None = None,
+) -> bool:
     """每个轮询周期向主服务上报心跳 + 完整系统状态。
 
     temp=None 表示 LHM 不可达。服务端通过心跳中断判定主机失联，
@@ -318,7 +345,7 @@ def send_heartbeat(temp: float | None, recent_points: list,
         resp = requests.post(url, json=payload, headers=headers, timeout=5)
         resp.raise_for_status()
         if not _last_heartbeat_ok:
-            print(f"[OK] 心跳恢复")
+            print("[OK] 心跳恢复")
         _last_heartbeat_ok = True
         return True
     except requests.RequestException as exc:
@@ -332,9 +359,10 @@ def send_heartbeat(temp: float | None, recent_points: list,
 # ║                        Webhook 告警上报                                      ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
+
 def send_webhook(sensor: dict, value: float, recent_points: list) -> bool:
     """向 FastAPI /api/alerts/ingest 发送温度告警事件。"""
-    ts = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    ts = datetime.now(UTC).astimezone().isoformat(timespec="seconds")
     payload = {
         "source": "librehardwaremonitor",
         "host": HOST_NAME,
@@ -365,7 +393,7 @@ def send_webhook(sensor: dict, value: float, recent_points: list) -> bool:
 
 def send_process_exit_alert(process_name: str, crash_info: dict, snapshot: dict) -> bool:
     """向 FastAPI /api/alerts/ingest 发送进程异常退出告警。"""
-    ts = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    ts = datetime.now(UTC).astimezone().isoformat(timespec="seconds")
     crash_type = crash_info.get("crash_type", "unknown")
     stack_trace = crash_info.get("stack_trace", "")
 
@@ -413,6 +441,7 @@ def send_process_exit_alert(process_name: str, crash_info: dict, snapshot: dict)
 # ║                        启动自检                                             ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
+
 def startup_check() -> None:
     """启动自检：检查上次是否异常退出，若是则打印死前快照内容。"""
     last_breath = EMERGENCY_SNAPSHOT_DIR / "last_breath.json"
@@ -434,9 +463,11 @@ def startup_check() -> None:
             print(f"  温度:     {temp}°C")
             print(f"  CPU:      {cpu}%")
             print(f"  内存:     {mem}%")
-            print(f"  TOP 进程:")
+            print("  TOP 进程:")
             for p in procs[:5]:
-                print(f"    {p.get('name', '?')}: CPU {p.get('cpu', 0)}%, MEM {p.get('memory', 0)}%")
+                print(
+                    f"    {p.get('name', '?')}: CPU {p.get('cpu', 0)}%, MEM {p.get('memory', 0)}%"
+                )
             print("=" * 60)
             print()
             # 清理 last_breath，避免每次重启都打印
@@ -460,8 +491,60 @@ def startup_check() -> None:
 # ║                        主循环                                               ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
+
+def heartbeat_loop(stopping):
+    while not stopping.is_set():
+        tick = time.monotonic()
+        try:
+            snapshot = collect_system_snapshot()
+            sensor = fetch_temperature(LHM_SENSOR_NAME_CONTAINS) if ONCALL_TEMP_ENABLED else None
+            send_heartbeat(
+                sensor["value"] if sensor else None,
+                [],
+                snapshot.get("cpu_percent"),
+                snapshot.get("memory_percent"),
+                snapshot.get("top_processes"),
+            )
+        except Exception as exc:
+            print(f"[WARN] 心跳采集失败: {type(exc).__name__}")
+        stopping.wait(max(0, HEARTBEAT_INTERVAL_SEC - (time.monotonic() - tick)))
+
+
+def log_upload_loop(stopping):
+    collector = IncrementalLogCollector(
+        MATLAB_LOG_GLOBS,
+        EMERGENCY_SNAPSHOT_DIR / "matlab_log_cursor.json",
+        max_files=int(os.getenv("MATLAB_LOG_MAX_FILES", "8")),
+        read_bytes=int(os.getenv("MATLAB_LOG_READ_BYTES", "65536")),
+        log_chars=int(os.getenv("ONCALL_HISTORY_LOG_CHARS", "4096")),
+        spool_entries=int(os.getenv("MATLAB_LOG_SPOOL_ENTRIES", "128")),
+        spool_bytes=int(os.getenv("MATLAB_LOG_SPOOL_BYTES", "262144")),
+    )
+    retry = MATLAB_LOG_INTERVAL_SEC
+    while not stopping.is_set():
+        try:
+            collector.collect()
+            batch = collector.batch(
+                max_bytes=int(os.getenv("ONCALL_HISTORY_PAYLOAD_BYTES", "65536"))
+            )
+            if batch:
+                response = requests.post(
+                    f"{FASTAPI_BASE_URL}/api/host-logs",
+                    json={"host": HOST_NAME, "entries": batch},
+                    headers={"Authorization": f"Bearer {ALERT_WEBHOOK_TOKEN}"},
+                    timeout=5,
+                )
+                response.raise_for_status()
+                collector.acknowledge(batch)
+            retry = MATLAB_LOG_INTERVAL_SEC
+        except Exception as exc:
+            print(f"[WARN] 关键日志上传待重试: {type(exc).__name__}")
+            retry = min(60, max(MATLAB_LOG_INTERVAL_SEC, retry * 2))
+        stopping.wait(retry)
+
+
 def main() -> None:
-    print(f"SuperBizAgent — OnCall 检测 Agent v2")
+    print("SuperBizAgent — OnCall 检测 Agent v2")
     print(f"  LHM URL:      {LHM_BASE_URL}")
     print(f"  FastAPI URL:  {FASTAPI_BASE_URL}")
     print(f"  温度监控:     {'开启' if ONCALL_TEMP_ENABLED else '关闭'}")
@@ -480,8 +563,8 @@ def main() -> None:
     startup_check()
 
     # 温度告警状态
-    breach_start: Optional[float] = None
-    last_alert_at: Optional[float] = None
+    breach_start: float | None = None
+    last_alert_at: float | None = None
     recent_points: list = []
 
     # 进程监控状态
@@ -504,6 +587,13 @@ def main() -> None:
     EMERGENCY_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     running_flag.touch()
 
+    stopping = threading.Event()
+    background = [threading.Thread(target=heartbeat_loop, args=(stopping,), daemon=True)]
+    if MATLAB_LOG_GLOBS:
+        background.append(threading.Thread(target=log_upload_loop, args=(stopping,), daemon=True))
+    for thread in background:
+        thread.start()
+
     try:
         while True:
             # ── 1. 进程存活检测 ─────────────────────────────────────────
@@ -519,7 +609,11 @@ def main() -> None:
                     print()
                     print(f"[进程监控] {MONITOR_PROCESS} 进程已消失！正在检查崩溃日志...")
 
-                    crash_info: dict = {"crash_type": "unknown", "stack_trace": "", "raw_snippet": ""}
+                    crash_info: dict = {
+                        "crash_type": "unknown",
+                        "stack_trace": "",
+                        "raw_snippet": "",
+                    }
                     snapshot = collect_system_snapshot()
 
                     # 尝试读取崩溃日志
@@ -536,7 +630,7 @@ def main() -> None:
                         elif dump_path:
                             print(f"[进程监控] 崩溃日志未更新 ({dump_path})，可能不是本次崩溃")
                         else:
-                            print(f"[进程监控] 未找到崩溃日志，可能进程是被手动结束的")
+                            print("[进程监控] 未找到崩溃日志，可能进程是被手动结束的")
 
                     # 发送告警
                     send_process_exit_alert(MONITOR_PROCESS, crash_info, snapshot)
@@ -574,21 +668,18 @@ def main() -> None:
             snapshot = collect_system_snapshot()
             cpu_pct = snapshot.get("cpu_percent")
             mem_pct = snapshot.get("memory_percent")
-            top_procs = snapshot.get("top_processes", [])
 
             # ── 3. 持续快照落盘 ──────────────────────────────────────────
             write_light_snapshot(snapshot)
 
             # ── 4. 读取温度传感器（仅在开关打开时）───────────────────
-            current_temp_val: float | None = None
             if ONCALL_TEMP_ENABLED:
                 sensor = fetch_temperature(LHM_SENSOR_NAME_CONTAINS)
-                current_temp_val = sensor["value"] if sensor else None
             else:
                 sensor = None
 
             # ── 5. 发送心跳（每轮都发，携带完整系统数据）─────────────────
-            send_heartbeat(current_temp_val, recent_points, cpu_pct, mem_pct, top_procs)
+            # Heartbeat thread has its own interval; log retries never block it.
 
             # ── 6. 温度告警检测（仅在开关打开时）───────────────────────
             ts_str = datetime.now().strftime("%H:%M:%S")
@@ -609,7 +700,7 @@ def main() -> None:
                 if value >= ONCALL_TEMP_THRESHOLD_C:
                     if breach_start is None:
                         breach_start = now
-                        print(f" [超阈开始]", end="")
+                        print(" [超阈开始]", end="")
                     elapsed = now - breach_start
                     print(f" [持续 {elapsed:.0f}s / 需 {ONCALL_TEMP_DURATION_SEC}s]", end="")
                     if elapsed >= ONCALL_TEMP_DURATION_SEC:
@@ -629,7 +720,7 @@ def main() -> None:
                             print(f" [冷却中 剩余 {remaining:.0f}s]", end="")
                 else:
                     if breach_start is not None:
-                        print(f" [已恢复正常]", end="")
+                        print(" [已恢复正常]", end="")
                     breach_start = None
             elif ONCALL_TEMP_ENABLED and sensor is None:
                 print(f"[WARN] 未找到传感器 '{LHM_SENSOR_NAME_CONTAINS}'，LHM 是否已启动？")
@@ -643,6 +734,9 @@ def main() -> None:
             time.sleep(POLL_INTERVAL_SEC)
 
     finally:
+        stopping.set()
+        for thread in background:
+            thread.join(timeout=6)
         # 正常退出时清理启动标记
         if running_flag.exists():
             running_flag.unlink()
