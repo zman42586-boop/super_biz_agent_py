@@ -14,6 +14,7 @@ from loguru import logger
 
 from app.agent.aiops import PlanExecuteState, executor, microcompact, planner, replanner
 from app.harness.config import harness_settings
+from app.harness.repository import LeaseLostError
 from app.harness.runtime import get_run_context
 from app.memory import memory_writer
 from app.utils.token_meter import count_steps_tokens, log_compression
@@ -48,10 +49,10 @@ class AIOpsService:
         workflow = StateGraph(PlanExecuteState)
 
         # 添加节点
-        workflow.add_node(NODE_PLANNER, planner)          # 制定计划
-        workflow.add_node(NODE_EXECUTOR, executor)        # 执行步骤
+        workflow.add_node(NODE_PLANNER, planner)  # 制定计划
+        workflow.add_node(NODE_EXECUTOR, executor)  # 执行步骤
         workflow.add_node(NODE_MICROCOMPACT, microcompact)  # Level 2: 压缩大工具结果
-        workflow.add_node(NODE_REPLANNER, replanner)      # 重新规划
+        workflow.add_node(NODE_REPLANNER, replanner)  # 重新规划
 
         # 新任务从 Planner 开始；持久化任务恢复时从尚未完成的节点继续。
         def choose_entry(state: PlanExecuteState) -> str:
@@ -103,7 +104,7 @@ class AIOpsService:
             {
                 NODE_EXECUTOR: NODE_EXECUTOR,
                 END: END,
-            }
+            },
         )
 
         # 编译工作流
@@ -145,16 +146,12 @@ class AIOpsService:
 
             # 流式执行工作流
             config_dict = {
-                "configurable": {
-                    "thread_id": execution_id or session_id
-                },
+                "configurable": {"thread_id": execution_id or session_id},
                 "recursion_limit": max(1, harness_settings.graph_recursion_limit),
             }
 
             async for event in self.graph.astream(
-                input=graph_input,
-                config=config_dict,
-                stream_mode="updates"
+                input=graph_input, config=config_dict, stream_mode="updates"
             ):
                 # 解析事件
                 for node_name, node_output in event.items():
@@ -211,13 +208,38 @@ class AIOpsService:
 
             # 长期记忆：将诊断结果写入 memory/incidents/
             # 必须在 yield complete 之前执行，否则上层生成器 break 会导致保存不执行
+            run_context = get_run_context()
+            if run_context and run_context.offline_host:
+                from app.harness.host_report import format_host_report
+
+                durable_run = await asyncio.to_thread(
+                    run_context.repository.get_run, run_context.run_id
+                )
+                final_response = await asyncio.to_thread(
+                    format_host_report, durable_run, final_response, run_context.repository
+                )
+            if run_context is not None:
+                owned = await asyncio.to_thread(
+                    run_context.repository.check_ownership,
+                    run_context.run_id,
+                    run_context.worker_id,
+                    run_context.version,
+                )
+                if not owned:
+                    raise LeaseLostError("Lost lease before incident write")
             if final_response and not session_id.startswith("alert_eval_"):
                 try:
                     await memory_writer.save_incident(
-                        session_id=session_id,
+                        session_id=(
+                            f"{session_id}_version_{run_context.version}"
+                            if run_context
+                            else session_id
+                        ),
                         task_description=user_input[:120],
                         report=final_response,
                     )
+                except LeaseLostError:
+                    raise
                 except Exception as mem_err:
                     logger.warning(f"[MemoryWriter] 保存 incident 失败（不影响主流程）: {mem_err}")
 
@@ -226,9 +248,12 @@ class AIOpsService:
                 "type": "complete",
                 "stage": "complete",
                 "message": "任务执行完成",
-                "response": final_response
+                "host_report_finalized": bool(run_context and run_context.offline_host),
+                "response": final_response,
             }
 
+        except LeaseLostError:
+            raise
         except Exception as e:
             logger.error(f"[会话 {session_id}] 任务执行失败: {e}", exc_info=True)
             yield {
@@ -242,10 +267,7 @@ class AIOpsService:
                 "message": f"任务执行出错: {str(e)}",
             }
 
-    async def diagnose(
-        self,
-        session_id: str = "default"
-    ) -> AsyncGenerator[dict[str, Any], None]:
+    async def diagnose(self, session_id: str = "default") -> AsyncGenerator[dict[str, Any], None]:
         """
         AIOps 诊断接口（兼容旧接口）
 
@@ -257,6 +279,7 @@ class AIOpsService:
         """
         # 使用固定的 AIOps 任务描述
         from textwrap import dedent
+
         aiops_task = dedent("""诊断当前系统是否存在告警，如果存在告警请详细分析告警原因并生成诊断报告，诊断报告输出格式要求：
                 ```
                 # 告警分析报告
@@ -339,10 +362,7 @@ class AIOpsService:
                     "type": "complete",
                     "stage": "diagnosis_complete",
                     "message": "诊断流程完成",
-                    "diagnosis": {
-                        "status": "completed",
-                        "report": event.get("response", "")
-                    }
+                    "diagnosis": {"status": "completed", "report": event.get("response", "")},
                 }
             else:
                 yield event
@@ -373,6 +393,13 @@ class AIOpsService:
             if event.get("type") == "complete":
                 report = event.get("response", "")
                 break
+            if event.get("type") == "error":
+                from app.harness.worker import RunExecutionError
+
+                raise RunExecutionError(
+                    event.get("error_code", "AGENT_EXECUTION_FAILED"),
+                    event.get("message", "Graph failed"),
+                )
             if event.get("type") == "report":
                 report = event.get("report", "")
 
@@ -381,11 +408,7 @@ class AIOpsService:
     def _format_planner_event(self, state: dict | None) -> dict:
         """格式化 Planner 节点事件"""
         if not state:
-            return {
-                "type": "status",
-                "stage": "planner",
-                "message": "规划节点执行中"
-            }
+            return {"type": "status", "stage": "planner", "message": "规划节点执行中"}
 
         plan = state.get("plan", [])
 
@@ -393,17 +416,13 @@ class AIOpsService:
             "type": "plan",
             "stage": "plan_created",
             "message": f"执行计划已制定，共 {len(plan)} 个步骤",
-            "plan": plan
+            "plan": plan,
         }
 
     def _format_executor_event(self, state: dict | None) -> dict:
         """格式化 Executor 节点事件"""
         if not state:
-            return {
-                "type": "status",
-                "stage": "executor",
-                "message": "执行节点运行中"
-            }
+            return {"type": "status", "stage": "executor", "message": "执行节点运行中"}
 
         plan = state.get("plan", [])
         past_steps = state.get("past_steps", [])
@@ -415,23 +434,15 @@ class AIOpsService:
                 "stage": "step_executed",
                 "message": f"步骤执行完成 ({len(past_steps)}/{len(past_steps) + len(plan)})",
                 "current_step": last_step,
-                "remaining_steps": len(plan)
+                "remaining_steps": len(plan),
             }
         else:
-            return {
-                "type": "status",
-                "stage": "executor",
-                "message": "开始执行步骤"
-            }
+            return {"type": "status", "stage": "executor", "message": "开始执行步骤"}
 
     def _format_replanner_event(self, state: dict | None) -> dict:
         """格式化 Replanner 节点事件"""
         if not state:
-            return {
-                "type": "status",
-                "stage": "replanner",
-                "message": "评估节点运行中"
-            }
+            return {"type": "status", "stage": "replanner", "message": "评估节点运行中"}
 
         response = state.get("response", "")
         plan = state.get("plan", [])
@@ -442,7 +453,7 @@ class AIOpsService:
                 "type": "report",
                 "stage": "final_report",
                 "message": "最终报告已生成",
-                "report": response
+                "report": response,
             }
         else:
             # 重新规划
@@ -450,7 +461,7 @@ class AIOpsService:
                 "type": "status",
                 "stage": "replanner",
                 "message": f"评估完成，{'继续执行剩余步骤' if plan else '准备生成最终响应'}",
-                "remaining_steps": len(plan)
+                "remaining_steps": len(plan),
             }
 
 

@@ -5,6 +5,7 @@
 
 from typing import Any
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -88,7 +89,20 @@ class Settings(BaseSettings):
     oncall_temp_duration_sec: int = 60  # 连续超阈持续秒数
     oncall_temp_cooldown_sec: int = 120  # 告警冷却期（秒），期间不重复发邮件
     # 心跳超时：Agent 定期上报心跳，超过此时间未收到则判定主机失联
-    oncall_heartbeat_timeout_sec: int = 60
+    oncall_heartbeat_timeout_sec: int = Field(default=60, ge=1)
+    oncall_heartbeat_check_interval_sec: float = Field(default=10, gt=0)
+    oncall_heartbeat_suspected_sec: int = Field(default=30, ge=1)
+    oncall_history_ttl_sec: int = Field(default=7200, ge=1)
+    oncall_history_metrics_per_host: int = Field(default=1600, ge=1, le=10000)
+    oncall_history_logs_per_host: int = Field(default=400, ge=1, le=10000)
+    oncall_history_payload_bytes: int = Field(default=65536, ge=1024, le=1048576)
+    oncall_history_log_chars: int = Field(default=4096, ge=128, le=16384)
+
+    @model_validator(mode="after")
+    def validate_heartbeat_thresholds(self):
+        if self.oncall_heartbeat_suspected_sec > self.oncall_heartbeat_timeout_sec:
+            raise ValueError("suspected threshold must not exceed down threshold")
+        return self
 
     # AIOps 自动诊断开关（仅对 critical 告警）
     oncall_auto_diagnosis: bool = True

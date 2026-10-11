@@ -14,8 +14,11 @@ from pydantic import BaseModel, Field
 from app.agent.mcp_client import get_mcp_tools_with_circuit_breaker
 from app.core.llm_factory import llm_factory
 from app.harness.config import harness_settings
+from app.harness.repository import LeaseLostError
+from app.harness.runtime import ensure_run_ownership
 from app.tools import get_current_time, retrieve_knowledge
 from app.tools.catalog import format_tool_catalog
+from app.tools.host_history import available_tools, offline_notice
 from app.utils.context_compaction import collapse_past_steps, format_execution_history
 from app.utils.token_meter import log_token_budget
 
@@ -129,6 +132,7 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
     2. replan - 调整计划（替换剩余步骤）
     3. respond - 生成最终响应
     """
+    await ensure_run_ownership()
     logger.info("=== Replanner：重新规划 ===")
 
     input_text = state.get("input", "")
@@ -161,14 +165,18 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
         local_tools = [get_current_time, retrieve_knowledge]
 
         # 获取 MCP 工具
-        mcp_tools = await get_mcp_tools_with_circuit_breaker()
+        local_tools, mcp_tools = await available_tools(
+            local_tools, get_mcp_tools_with_circuit_breaker
+        )
 
         # 合并所有工具
         all_tools = local_tools + mcp_tools
         logger.info(f"可用工具数量: 本地 {len(local_tools)} + MCP {len(mcp_tools)}")
 
         # 渐进式披露：Replanner 只看到紧凑目录，不看到完整参数 Schema。
-        tools_description = format_tool_catalog(all_tools)
+        tools_description = format_tool_catalog(all_tools) + offline_notice()
+    except LeaseLostError:
+        raise
     except Exception as e:
         logger.warning(f"获取工具列表失败: {e}")
         tools_description = "无法获取工具列表"
@@ -261,6 +269,8 @@ async def replanner(state: PlanExecuteState) -> dict[str, Any]:
                 logger.info("决定继续执行当前计划")
                 return {"steps_summary": steps_summary_for_state}
 
+        except LeaseLostError:
+            raise
         except Exception as e:
             logger.error(f"重新规划失败: {e}, 继续执行剩余计划")
             return {}
@@ -297,6 +307,7 @@ async def _generate_response(state: PlanExecuteState, llm: ChatOpenAI) -> dict[s
             {"task": input_text, "history": execution_history},
         )
 
+        await ensure_run_ownership()
         response_obj = await response_gen.ainvoke({"messages": messages})
 
         # 处理返回结果
@@ -310,6 +321,8 @@ async def _generate_response(state: PlanExecuteState, llm: ChatOpenAI) -> dict[s
 
         return {"response": final_response}
 
+    except LeaseLostError:
+        raise
     except Exception as e:
         logger.error(f"生成响应失败: {e}")
         # 生成简单的后备响应

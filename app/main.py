@@ -29,12 +29,21 @@ async def lifespan(app: FastAPI):
 
     # 连接 Milvus
     logger.info("正在连接 Milvus...")
-    milvus_manager.connect()
-    logger.info("Milvus 连接成功")
+    try:
+        milvus_manager.connect()
+        logger.info("Milvus 连接成功")
+    except Exception:
+        logger.exception("Milvus 不可用，服务以检索降级模式启动；心跳与持久化任务仍可工作")
 
     logger.info("=" * 60)
 
-    yield
+    from app.services.alert_service import alert_service
+
+    alert_service.start_heartbeat_monitor()
+    try:
+        yield
+    finally:
+        await alert_service.stop_heartbeat_monitor()
 
     # 关闭时执行
     logger.info("正在关闭 Milvus 连接...")

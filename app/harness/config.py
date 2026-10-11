@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import quote
+
+from dotenv import load_dotenv
 
 
 def _as_bool(value: str, default: bool) -> bool:
@@ -20,6 +24,7 @@ class HarnessSettings:
     auto_create_schema: bool = True
     poll_interval_seconds: float = 1.0
     lease_seconds: int = 30
+    recovery_interval_seconds: float = 5.0
     run_timeout_seconds: float = 300.0
     tool_timeout_seconds: float = 10.0
     tool_max_retries: int = 2
@@ -33,12 +38,13 @@ class HarnessSettings:
 
     @classmethod
     def from_env(cls) -> HarnessSettings:
+        load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
         explicit_url = os.getenv("HARNESS_DATABASE_URL", "").strip()
         if explicit_url:
             database_url = explicit_url
         else:
-            user = os.getenv("HARNESS_MYSQL_USER", "superbiz")
-            password = os.getenv("HARNESS_MYSQL_PASSWORD", "superbiz")
+            user = quote(os.getenv("HARNESS_MYSQL_USER", "superbiz"), safe="")
+            password = quote(os.getenv("HARNESS_MYSQL_PASSWORD", "superbiz"), safe="")
             host = os.getenv("HARNESS_MYSQL_HOST", "127.0.0.1")
             port = os.getenv("HARNESS_MYSQL_PORT", "3306")
             database = os.getenv("HARNESS_MYSQL_DATABASE", "superbiz_agent")
@@ -51,6 +57,7 @@ class HarnessSettings:
             auto_create_schema=_as_bool(os.getenv("HARNESS_AUTO_CREATE_SCHEMA", "true"), True),
             poll_interval_seconds=float(os.getenv("HARNESS_POLL_INTERVAL_SEC", "1")),
             lease_seconds=int(os.getenv("HARNESS_LEASE_SEC", "30")),
+            recovery_interval_seconds=float(os.getenv("HARNESS_RECOVERY_INTERVAL_SEC", "5")),
             run_timeout_seconds=float(os.getenv("HARNESS_RUN_TIMEOUT_SEC", "300")),
             tool_timeout_seconds=float(os.getenv("HARNESS_TOOL_TIMEOUT_SEC", "10")),
             tool_max_retries=int(os.getenv("HARNESS_TOOL_MAX_RETRIES", "2")),

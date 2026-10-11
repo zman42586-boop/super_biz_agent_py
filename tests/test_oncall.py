@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import smtplib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +12,7 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 
 # ── 1. 告警模型校验 ──────────────────────────────────────────────────────
+
 
 def test_alert_ingest_request_valid():
     from app.models.alert import AlertEvidence, AlertIngestRequest
@@ -60,6 +60,7 @@ def test_alert_record_defaults():
 
 # ── 2. config 中 SMTP 字段 ──────────────────────────────────────────────
 
+
 def test_config_smtp_fields():
     from app.config import config
 
@@ -73,9 +74,10 @@ def test_config_smtp_fields():
 
 # ── 3. SMTP 发送服务（mock SMTP_SSL，不真实发送）──────────────────────
 
+
 def test_send_alert_email_success(monkeypatch):
-    from app.services.mail_service import send_alert_email
     from app.services import mail_service
+    from app.services.mail_service import send_alert_email
 
     monkeypatch.setattr(mail_service.config, "smtp_user", "sender@example.com")
     monkeypatch.setattr(mail_service.config, "smtp_pass", "test-password")
@@ -108,6 +110,7 @@ def test_send_alert_email_missing_config(monkeypatch):
 
 
 # ── 4. 邮件正文构造 ─────────────────────────────────────────────────────
+
 
 def test_build_alert_email_body():
     from app.services.mail_service import build_alert_email_body
@@ -150,13 +153,16 @@ def test_build_alert_email_body_with_report():
 
 # ── 5. AlertService 去重逻辑 ───────────────────────────────────────────
 
+
 @pytest.mark.asyncio
-async def test_alert_service_dedup():
+async def test_alert_service_dedup(tmp_path):
     """相同 host+sensor_id 的活跃告警不应重复处理。"""
+    from app.harness.repository import HarnessRepository
     from app.models.alert import AlertEvidence, AlertIngestRequest
     from app.services.alert_service import AlertService
 
-    svc = AlertService()
+    repository = HarnessRepository(f"sqlite+pysqlite:///{(tmp_path / 'dedup.sqlite').as_posix()}")
+    svc = AlertService(repository_factory=lambda: repository)
 
     req = AlertIngestRequest(
         source="lhm",
@@ -185,11 +191,13 @@ async def test_alert_service_dedup():
 
 
 @pytest.mark.asyncio
-async def test_alert_service_resolve():
+async def test_alert_service_resolve(tmp_path):
+    from app.harness.repository import HarnessRepository
     from app.models.alert import AlertEvidence, AlertIngestRequest
     from app.services.alert_service import AlertService
 
-    svc = AlertService()
+    repository = HarnessRepository(f"sqlite+pysqlite:///{(tmp_path / 'resolve.sqlite').as_posix()}")
+    svc = AlertService(repository_factory=lambda: repository)
     req = AlertIngestRequest(
         source="lhm",
         host="PC2",
@@ -217,8 +225,10 @@ async def test_alert_service_resolve():
 
 # ── 6. LHM 传感器解析（使用 fixture JSON）─────────────────────────────
 
+
 def test_lhm_sensor_parser():
     import sys
+
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
     from lhm_alert_agent import _find_sensors
 

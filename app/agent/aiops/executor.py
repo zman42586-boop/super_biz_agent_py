@@ -15,9 +15,11 @@ from app.agent.tool_selector import select_tools_for_task
 from app.claude_skills import list_skill_ids
 from app.core.llm_factory import llm_factory
 from app.harness.loop_guard import loop_guard
-from app.harness.runtime import get_run_context
+from app.harness.repository import LeaseLostError
+from app.harness.runtime import ensure_run_ownership, get_run_context
 from app.harness.tool_gateway import ToolExecutionError, tool_gateway
 from app.tools import get_current_time, retrieve_knowledge, search_log
+from app.tools.host_history import available_tools, offline_notice
 from app.tools.result import make_tool_result
 
 from .state import PlanExecuteState
@@ -29,6 +31,7 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
     所有工具调用统一经过 Harness Tool Gateway
     """
+    await ensure_run_ownership()
     logger.info("=== Executor：执行步骤 ===")
 
     plan = state.get("plan", [])
@@ -101,7 +104,11 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
         # 获取 MCP 工具（失败时降级为仅本地工具）
         try:
-            mcp_tools = await get_mcp_tools_with_circuit_breaker()
+            local_tools, mcp_tools = await available_tools(
+                local_tools, get_mcp_tools_with_circuit_breaker
+            )
+        except LeaseLostError:
+            raise
         except Exception as e:
             logger.warning(f"获取 MCP 工具失败: {e}")
             mcp_tools = []
@@ -119,7 +126,8 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
         # 构建消息（只包含当前步骤，避免原始任务干扰）
         messages = [
-            SystemMessage(content="""你是一个能力强大的助手，负责执行具体的任务步骤。
+            SystemMessage(
+                content="""你是一个能力强大的助手，负责执行具体的任务步骤。
 
 你可以使用各种工具来完成任务。对于每个步骤：
 1. 理解步骤的目标
@@ -132,11 +140,13 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 - 不要编造数据，只返回实际获取的信息
 - 严格区分日志事实、知识库证据和分析推断；证据不足时明确写“原因未确定”
 - 执行结果要清晰、准确
-- 专注于当前步骤，不要考虑其他任务"""),
-            HumanMessage(content=f"请执行以下任务: {task}"),
+- 专注于当前步骤，不要考虑其他任务"""
+            ),
+            HumanMessage(content=f"请执行以下任务: {task}" + offline_notice()),
         ]
 
         # 第一步：LLM 决定是否调用工具
+        await ensure_run_ownership()
         llm_response = await llm_with_tools.ainvoke(messages)
         logger.info(f"LLM 响应类型: {type(llm_response)}")
 
@@ -212,6 +222,7 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
             # 第三步：将工具结果返回给 LLM 生成最终答案
             messages.extend(tool_messages)
+            await ensure_run_ownership()
             final_response = await llm_with_tools.ainvoke(messages)
             result = (
                 final_response.content
@@ -230,7 +241,9 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
             step_status = (
                 "error"
                 if statuses and all(status == "error" for status in statuses)
-                else "partial" if any(status == "error" for status in statuses) else "success"
+                else "partial"
+                if any(status == "error" for status in statuses)
+                else "success"
             )
             result_for_state = make_tool_result(
                 status=step_status,
@@ -254,6 +267,8 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
             "past_steps": current_past_steps + [(task, result_for_state)],
         }
 
+    except LeaseLostError:
+        raise
     except Exception as e:
         logger.error(f"执行步骤失败: {e}", exc_info=True)
         if run_context is not None and step_row is not None:

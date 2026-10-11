@@ -11,7 +11,10 @@
 - 主动轮询：默认每 5 秒检查目标进程，同时采集系统 CPU、内存和 Top 进程。
 - MATLAB 退出检测：只有观察到进程从存活变为消失，才触发“进程异常退出”流程；如果能找到 dump 就附带 dump，否则仍会上报退出事件。
 - 可选温度监控：通过 LibreHardwareMonitor Web API 读取温度，默认关闭，可独立开启。
-- 心跳与死前快照：每轮向 FastAPI 上报状态，并在本地保存轻量快照；服务端可检测心跳超时。
+- 心跳与历史证据：独立线程默认每 5 秒发轻量 JSON；MySQL 保存主机状态和两小时内有界指标/关键日志，重启后继续检测。
+- 持久化诊断：进程退出创建 `alert_diagnosis`；持续失联创建 `host_down_diagnosis`，由 Harness Worker 执行已有 LangGraph。
+- Worker 恢复：运行期间周期回收租约；每次认领递增现有 `version` 作为 Fencing Token，续租及普通写入不递增；关键写入校验所有权，旧 Worker 无法覆盖接管后的状态。
+- 失联降级：实时 MCP / `search_log` 标记 unavailable，使用历史证据与 RAG，事实/检索/推断分开，原因保守标记“原因未确定”。
 - RAG 诊断：Dense 向量召回 + Milvus BM25 稀疏召回，经 RRF 融合后按置信度决定是否查询改写、重试和交叉编码重排。
 - 证据约束：最终上下文分为“事实、检索证据、推断”；证据不足时明确输出“原因未确定”和需补充的日志。
 - 分层记忆：诊断报告先写入 `memory/incidents/` 留档；LLM Judge 评估知识价值，高价值低风险案例自动入库，模糊或高风险案例转人工审核，只有 `approved` 内容能进入 Milvus 和 Planner 上下文。
@@ -30,7 +33,8 @@
                 `-- POST /api/alerts/ingest
                         |
                         +-- 告警去重与邮件
-                        `-- LangGraph Planner -> Executor -> Replanner
+                        `-- MySQL pending Run -> Harness Worker
+                                `-- LangGraph Planner -> Executor -> Replanner
                                 |
                                 +-- Milvus 混合检索与证据置信度
                                 +-- MCP 实时指标/本地日志工具
@@ -43,6 +47,8 @@
 注意：DeepSeek Flash 负责生成诊断；DeepSeek Pro 只在评测脚本中作为 Judge 使用，不在每次线上告警中强制执行。使用不同模型能降低“同一模型生成后再给自己打分”的相关性偏差，但不能消除 Judge 偏差，所以仍需人工标注集和规则指标。
 
 ## RAG 实现
+
+主机失联、租约回收、Fencing Token、数据库迁移和配置见 [持久化 OnCall 说明](docs/durable-oncall.md)。已有数据库需先停 API 和全部旧 Worker，运行 `scripts/migrate_harness_v2.py` 创建新表；保留现有 `version` 数值，可能已部署的 `lease_epoch` 列保留但不再使用。诊断完成与通知原子入队，SMTP 不确定交付不会自动重发，不能承诺邮件 exactly-once。
 
 ### 文档与切分
 
@@ -98,7 +104,7 @@ Milvus 用于同时保存 Dense、BM25 sparse、正文和 JSON metadata，并在
 
 ## 快速开始（Windows）
 
-要求：Python 3.11–3.13、Docker Desktop、可用的 OpenAI-compatible API key。Docker Desktop 需要先由用户启动；仓库脚本不会可靠地替你启动桌面程序。
+要求：Python 3.11–3.13、MySQL 8（SKIP LOCKED）、Docker Desktop、可用的 OpenAI-compatible API key。Docker Desktop 需要先由用户启动；仓库脚本不会可靠地替你启动桌面程序。
 
 ```powershell
 git clone https://github.com/zman42586-boop/super_biz_agent_py.git
@@ -162,6 +168,14 @@ MATLAB 监控示例：
 
 ```dotenv
 POLL_INTERVAL_SEC=5
+HEARTBEAT_INTERVAL_SEC=5
+ONCALL_HEARTBEAT_CHECK_INTERVAL_SEC=10
+ONCALL_HEARTBEAT_SUSPECTED_SEC=30
+ONCALL_HEARTBEAT_TIMEOUT_SEC=60
+HARNESS_LEASE_SEC=30
+HARNESS_RECOVERY_INTERVAL_SEC=5
+MATLAB_LOG_GLOBS=C:\matlab-logs\runtime.log*
+ONCALL_HISTORY_TTL_SEC=7200
 ONCALL_MONITOR_PROCESS=MATLAB.exe
 ONCALL_MONITOR_CRASH_DIR=C:\Users\YOUR_NAME\AppData\Roaming\MathWorks\MATLAB\CrashDumps
 ONCALL_MONITOR_CRASH_PATTERN=matlab_crash_dump.*
@@ -177,6 +191,8 @@ ONCALL_TEMP_ENABLED=false
 ```
 
 运行真实 Milvus 检索对照和自适应评测：
+
+本次新增的故障与降级测试、MySQL 实测入口及替换依赖的验收边界见 [测试说明](docs/durable-oncall.md#验收与限制)。以下 RAG 结果是仓库原有评测记录，不是本次变更新运行的结果。
 
 ```powershell
 .\.venv\Scripts\python.exe -m tests.eval_retrieval_v2

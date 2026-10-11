@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import threading
 import uuid
+from contextvars import ContextVar
 from datetime import datetime, timedelta
+from functools import wraps
 from typing import Any
 
-from sqlalchemy import create_engine, select, update
+from sqlalchemy import create_engine, func, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -22,6 +24,33 @@ from app.harness.models import (
     ToolCall,
     utc_now,
 )
+
+
+class LeaseLostError(RuntimeError):
+    """The caller no longer owns this run. Never retry writes with a new token."""
+
+
+_write_owner = ContextVar("write_owner", default=None)
+
+
+def fenced_write(method):
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        from app.harness.runtime import get_run_context
+
+        context = get_run_context()
+        worker = kwargs.pop("worker_id", context.worker_id if context else None)
+        epoch = kwargs.pop("version", context.version if context else None)
+        if not worker or epoch is None:
+            raise LeaseLostError("worker_id and version are required")
+        token = _write_owner.set((worker, epoch))
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            _write_owner.reset(token)
+
+    return guarded
+
 
 TERMINAL_RUN_STATUSES = {"succeeded", "failed", "cancelled"}
 
@@ -55,6 +84,8 @@ class HarnessRepository:
         )
         self._session_factory = sessionmaker(self.engine, expire_on_commit=False)
         if auto_create_schema:
+            from app.harness import monitoring_models  # noqa: F401 -- register tables
+
             Base.metadata.create_all(self.engine)
 
     def close(self) -> None:
@@ -109,9 +140,7 @@ class HarnessRepository:
     def list_steps(self, run_id: str) -> list[dict[str, Any]]:
         with self._session_factory() as session:
             rows = session.scalars(
-                select(AgentStep)
-                .where(AgentStep.run_id == run_id)
-                .order_by(AgentStep.step_index)
+                select(AgentStep).where(AgentStep.run_id == run_id).order_by(AgentStep.step_index)
             ).all()
             return [self._step_dict(row) for row in rows]
 
@@ -301,9 +330,7 @@ class HarnessRepository:
                     if evaluations
                     else None
                 ),
-                "pass_rate": self._ratio(
-                    sum(row.passed for row in evaluations), len(evaluations)
-                ),
+                "pass_rate": self._ratio(sum(row.passed for row in evaluations), len(evaluations)),
                 "hit_at_1": (
                     round(sum(hit_at_1_values) / len(hit_at_1_values), 4)
                     if hit_at_1_values
@@ -313,72 +340,183 @@ class HarnessRepository:
             },
         }
 
+    @fenced_write
     def append_event(self, run_id: str, event_type: str, payload: dict) -> int:
         with self._session_factory.begin() as session:
+            self._assert_owned(session, run_id)
             event = self._append_event(session, run_id, event_type, payload)
             session.flush()
             return event.id
 
+    def _clock(self):
+        # MySQL UTC clock is shared by all API and worker processes.
+        if self.engine.dialect.name == "mysql":
+            return func.utc_timestamp(6)
+        return func.strftime("%Y-%m-%d %H:%M:%f", "now")
+
+    def db_now(self, session: Session) -> datetime:
+        value = session.scalar(select(self._clock()))
+        return value if isinstance(value, datetime) else datetime.fromisoformat(value)
+
+    def _assert_owned(self, session: Session, run_id: str) -> AgentRun:
+        worker, epoch = _write_owner.get() or (None, None)
+        # Conditional no-op UPDATE locks the parent BEFORE any child mutation.
+        # SQLAlchemy MySQL drivers enable FOUND_ROWS (matched, not changed rows).
+        # version is a claim token, so locking/renewal must not increment it.
+        # The clock expression is evaluated by the database when updating.
+        result = session.execute(
+            update(AgentRun)
+            .where(
+                AgentRun.id == run_id,
+                AgentRun.status == "running",
+                AgentRun.worker_id == worker,
+                AgentRun.version == epoch,
+                AgentRun.lease_expires_at > self._clock(),
+            )
+            .values(version=AgentRun.version),
+            execution_options={"synchronize_session": False},
+        )
+        if result.rowcount != 1:
+            raise LeaseLostError(f"Run ownership lost: {run_id}, version={epoch}")
+        run = session.scalar(
+            select(AgentRun)
+            .where(AgentRun.id == run_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        # Recheck after lock acquisition; UTC_TIMESTAMP is statement-start time
+        # on MySQL and a writer may have waited for the row lock.
+        if run.lease_expires_at <= self.db_now(session):
+            raise LeaseLostError(f"Lease expired while acquiring write lock: {run_id}")
+        from app.harness.runtime import get_run_context
+
+        context = get_run_context()
+        if context is not None and context.run_id != run_id:
+            raise LeaseLostError("Context is bound to a different run")
+        return run
+
+    def check_ownership(self, run_id: str, worker_id: str, version: int) -> bool:
+        with self._session_factory() as session:
+            return (
+                session.scalar(
+                    select(AgentRun.id).where(
+                        AgentRun.id == run_id,
+                        AgentRun.status == "running",
+                        AgentRun.worker_id == worker_id,
+                        AgentRun.version == version,
+                        AgentRun.lease_expires_at > self._clock(),
+                    )
+                )
+                is not None
+            )
+
     def recover_stale_runs(self, *, now: datetime | None = None) -> int:
-        now = now or utc_now()
         with self._session_factory.begin() as session:
-            stale = session.scalars(
-                select(AgentRun)
-                .where(
-                    AgentRun.status == "running",
-                    AgentRun.lease_expires_at.is_not(None),
-                    AgentRun.lease_expires_at < now,
-                )
-                .with_for_update()
+            deadline = now or self.db_now(session)
+            stale = session.execute(
+                select(AgentRun.id, AgentRun.worker_id, AgentRun.version)
+                .where(AgentRun.status == "running", AgentRun.lease_expires_at < deadline)
+                .with_for_update(skip_locked=True)
             ).all()
-            for run in stale:
-                run.status = "interrupted"
-                run.worker_id = None
-                run.lease_expires_at = None
-                run.error_code = "WORKER_LEASE_EXPIRED"
-                run.error_message = "Worker heartbeat expired; the run can be resumed safely."
-                run.updated_at = now
-                run.version += 1
-                self._append_event(
-                    session,
-                    run.id,
-                    "run_interrupted",
-                    {"reason": "worker_lease_expired"},
+            recovered = 0
+            for run_id, worker, epoch in stale:
+                result = session.execute(
+                    update(AgentRun)
+                    .where(
+                        AgentRun.id == run_id,
+                        AgentRun.status == "running",
+                        AgentRun.version == epoch,
+                        AgentRun.lease_expires_at < deadline,
+                    )
+                    .values(
+                        status="interrupted",
+                        worker_id=None,
+                        lease_expires_at=None,
+                        error_code="WORKER_LEASE_EXPIRED",
+                        error_message="Worker lease expired; run awaiting reclaim.",
+                        updated_at=deadline,
+                    )
                 )
-            return len(stale)
+                if result.rowcount == 1:
+                    recovered += 1
+                    in_flight = session.scalars(
+                        select(ToolCall).where(
+                            ToolCall.run_id == run_id, ToolCall.status == "running"
+                        )
+                    ).all()
+                    for call in in_flight:
+                        self._append_event(
+                            session,
+                            run_id,
+                            "external_tool_execution_uncertain",
+                            {
+                                "tool_call_id": call.id,
+                                "tool_name": call.tool_name,
+                                "worker_id": worker,
+                                "version": epoch,
+                                "reason": "lease_expired_during_in_flight_call",
+                                "potential_duplicate_execution": True,
+                                "message": "Database fencing cannot cancel a submitted remote request; verify before replay.",
+                            },
+                        )
+                    self._append_event(
+                        session,
+                        run_id,
+                        "run_interrupted",
+                        {
+                            "reason": "worker_lease_expired",
+                            "worker_id": worker,
+                            "version": epoch,
+                        },
+                    )
+            return recovered
 
     def claim_next_run(self, worker_id: str, lease_seconds: int) -> dict[str, Any] | None:
-        now = utc_now()
         with self._session_factory.begin() as session:
-            run = session.scalar(
-                select(AgentRun)
+            candidate = session.execute(
+                select(AgentRun.id, AgentRun.status, AgentRun.version)
                 .where(AgentRun.status.in_(["pending", "interrupted"]))
-                .order_by(AgentRun.created_at)
+                .order_by(AgentRun.created_at, AgentRun.id)
                 .limit(1)
                 .with_for_update(skip_locked=True)
-            )
-            if run is None:
+            ).first()
+            if candidate is None:
                 return None
-            previous_status = run.status
-            run.status = "running"
-            run.worker_id = worker_id
-            run.lease_expires_at = now + timedelta(seconds=lease_seconds)
-            run.started_at = run.started_at or now
-            run.error_code = None
-            run.error_message = None
-            run.updated_at = now
-            run.version += 1
+            run_id, previous_status, epoch = candidate
+            now = self.db_now(session)
+            result = session.execute(
+                update(AgentRun)
+                .where(
+                    AgentRun.id == run_id,
+                    AgentRun.status == previous_status,
+                    AgentRun.version == epoch,
+                )
+                .values(
+                    status="running",
+                    worker_id=worker_id,
+                    version=epoch + 1,
+                    lease_expires_at=now + timedelta(seconds=max(1, lease_seconds)),
+                    started_at=func.coalesce(AgentRun.started_at, now),
+                    error_code=None,
+                    error_message=None,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount != 1:
+                return None
             self._append_event(
                 session,
-                run.id,
+                run_id,
                 "run_started" if previous_status == "pending" else "run_resumed",
-                {"worker_id": worker_id, "previous_status": previous_status},
+                {
+                    "worker_id": worker_id,
+                    "version": epoch + 1,
+                    "previous_status": previous_status,
+                },
             )
-            session.flush()
-            return self._run_dict(run)
+            return self._run_dict(session.get(AgentRun, run_id))
 
-    def renew_lease(self, run_id: str, worker_id: str, lease_seconds: int) -> bool:
-        now = utc_now()
+    def renew_lease(self, run_id: str, worker_id: str, lease_seconds: int, version: int) -> bool:
         with self._session_factory.begin() as session:
             result = session.execute(
                 update(AgentRun)
@@ -386,22 +524,28 @@ class HarnessRepository:
                     AgentRun.id == run_id,
                     AgentRun.status == "running",
                     AgentRun.worker_id == worker_id,
+                    AgentRun.version == version,
+                    AgentRun.lease_expires_at > self._clock(),
                 )
-                .values(
-                    lease_expires_at=now + timedelta(seconds=lease_seconds),
-                    updated_at=now,
-                    version=AgentRun.version + 1,
-                )
+                .values(version=AgentRun.version)
             )
-            return bool(result.rowcount)
+            if result.rowcount != 1:
+                return False
+            run = session.get(AgentRun, run_id)
+            now = self.db_now(session)
+            if run.lease_expires_at <= now:
+                return False
+            run.lease_expires_at = now + timedelta(seconds=max(1, lease_seconds))
+            run.updated_at = now
+            return True
 
+    @fenced_write
     def merge_checkpoint(self, run_id: str, node_name: str, state_update: dict) -> None:
         safe_update = _json_safe(state_update or {})
         now = utc_now()
         with self._session_factory.begin() as session:
-            run = session.scalar(
-                select(AgentRun).where(AgentRun.id == run_id).with_for_update()
-            )
+            self._assert_owned(session, run_id)
+            run = session.scalar(select(AgentRun).where(AgentRun.id == run_id).with_for_update())
             if run is None:
                 raise KeyError(f"Run not found: {run_id}")
             state = dict(run.state_json or {})
@@ -410,7 +554,6 @@ class HarnessRepository:
             run.plan_json = list(state.get("plan") or [])
             run.current_step_index = len(state.get("past_steps") or [])
             run.updated_at = now
-            run.version += 1
             self._append_event(
                 session,
                 run_id,
@@ -418,6 +561,7 @@ class HarnessRepository:
                 {"node": node_name, "current_step_index": run.current_step_index},
             )
 
+    @fenced_write
     def start_step(
         self,
         run_id: str,
@@ -427,6 +571,7 @@ class HarnessRepository:
     ) -> dict[str, Any]:
         now = utc_now()
         with self._session_factory.begin() as session:
+            self._assert_owned(session, run_id)
             step = session.scalar(
                 select(AgentStep)
                 .where(AgentStep.run_id == run_id, AgentStep.step_index == step_index)
@@ -464,6 +609,7 @@ class HarnessRepository:
             )
             return self._step_dict(step)
 
+    @fenced_write
     def complete_step(
         self,
         step_id: int,
@@ -476,6 +622,8 @@ class HarnessRepository:
             step = session.get(AgentStep, step_id)
             if step is None:
                 raise KeyError(f"Step not found: {step_id}")
+            self._assert_owned(session, step.run_id)
+            session.refresh(step, with_for_update=True)
             step.status = "succeeded"
             step.output_json = {"content": _json_safe(output)}
             step.output_artifact_path = artifact_path
@@ -490,12 +638,15 @@ class HarnessRepository:
                 {"step_id": step.id, "step_index": step.step_index},
             )
 
+    @fenced_write
     def fail_step(self, step_id: int, error_code: str, error_message: str) -> None:
         now = utc_now()
         with self._session_factory.begin() as session:
             step = session.get(AgentStep, step_id)
             if step is None:
                 return
+            self._assert_owned(session, step.run_id)
+            session.refresh(step, with_for_update=True)
             step.status = "failed"
             step.error_code = error_code
             step.error_message = error_message[:4000]
@@ -512,6 +663,7 @@ class HarnessRepository:
                 },
             )
 
+    @fenced_write
     def begin_tool_call(
         self,
         *,
@@ -523,11 +675,17 @@ class HarnessRepository:
     ) -> tuple[dict[str, Any], bool]:
         now = utc_now()
         with self._session_factory.begin() as session:
+            self._assert_owned(session, run_id)
+            step_owner = session.scalar(select(AgentStep.run_id).where(AgentStep.id == step_id))
+            if step_owner != run_id:
+                raise LeaseLostError("Tool call step belongs to a different run")
             call = session.scalar(
                 select(ToolCall)
                 .where(ToolCall.idempotency_key == idempotency_key)
                 .with_for_update()
             )
+            if call is not None and (call.run_id != run_id or call.step_id != step_id):
+                raise LeaseLostError("Idempotency key belongs to a different run/step")
             if call is not None and call.status == "succeeded":
                 return self._tool_call_dict(call), True
             if call is None:
@@ -566,6 +724,7 @@ class HarnessRepository:
             )
             return self._tool_call_dict(call), False
 
+    @fenced_write
     def complete_tool_call(
         self,
         tool_call_id: int,
@@ -579,6 +738,8 @@ class HarnessRepository:
             call = session.get(ToolCall, tool_call_id)
             if call is None:
                 raise KeyError(f"ToolCall not found: {tool_call_id}")
+            self._assert_owned(session, call.run_id)
+            session.refresh(call, with_for_update=True)
             call.status = "succeeded"
             call.result_json = _json_safe(result)
             call.result_artifact_path = artifact_path
@@ -596,6 +757,7 @@ class HarnessRepository:
                 },
             )
 
+    @fenced_write
     def fail_tool_call(
         self,
         tool_call_id: int,
@@ -610,6 +772,8 @@ class HarnessRepository:
             call = session.get(ToolCall, tool_call_id)
             if call is None:
                 return
+            self._assert_owned(session, call.run_id)
+            session.refresh(call, with_for_update=True)
             call.status = "failed" if terminal else "retrying"
             call.error_code = error_code
             call.error_message = error_message[:4000]
@@ -628,10 +792,12 @@ class HarnessRepository:
                 },
             )
 
+    @fenced_write
     def finish_run(self, run_id: str, final_report: str) -> None:
         now = utc_now()
         with self._session_factory.begin() as session:
-            run = session.get(AgentRun, run_id)
+            self._assert_owned(session, run_id)
+            run = session.scalar(select(AgentRun).where(AgentRun.id == run_id))
             if run is None:
                 raise KeyError(f"Run not found: {run_id}")
             if run.status == "cancelled":
@@ -642,13 +808,28 @@ class HarnessRepository:
             run.lease_expires_at = None
             run.finished_at = now
             run.updated_at = now
-            run.version += 1
             self._append_event(session, run_id, "run_succeeded", {"status": "succeeded"})
+            if run.kind in {"alert_diagnosis", "host_down_diagnosis"}:
+                from app.harness.monitoring_models import Notification
 
+                key = f"diagnosis:{run_id}"
+                if session.get(Notification, key) is None:
+                    session.add(
+                        Notification(
+                            id=key,
+                            run_id=run_id,
+                            status="pending",
+                            payload_json={"alert": run.input_json["alert"], "report": final_report},
+                            created_at=now,
+                        )
+                    )
+
+    @fenced_write
     def fail_run(self, run_id: str, error_code: str, error_message: str) -> None:
         now = utc_now()
         with self._session_factory.begin() as session:
-            run = session.get(AgentRun, run_id)
+            self._assert_owned(session, run_id)
+            run = session.scalar(select(AgentRun).where(AgentRun.id == run_id))
             if run is None or run.status == "cancelled":
                 return
             run.status = "failed"
@@ -658,17 +839,12 @@ class HarnessRepository:
             run.lease_expires_at = None
             run.finished_at = now
             run.updated_at = now
-            run.version += 1
-            self._append_event(
-                session, run_id, "run_failed", {"error_code": error_code}
-            )
+            self._append_event(session, run_id, "run_failed", {"error_code": error_code})
 
     def cancel_run(self, run_id: str) -> dict[str, Any] | None:
         now = utc_now()
         with self._session_factory.begin() as session:
-            run = session.scalar(
-                select(AgentRun).where(AgentRun.id == run_id).with_for_update()
-            )
+            run = session.scalar(select(AgentRun).where(AgentRun.id == run_id).with_for_update())
             if run is None:
                 return None
             if run.status not in TERMINAL_RUN_STATUSES:
@@ -677,16 +853,13 @@ class HarnessRepository:
                 run.lease_expires_at = None
                 run.finished_at = now
                 run.updated_at = now
-                run.version += 1
                 self._append_event(session, run_id, "run_cancelled", {})
             return self._run_dict(run)
 
     def resume_run(self, run_id: str) -> dict[str, Any] | None:
         now = utc_now()
         with self._session_factory.begin() as session:
-            run = session.scalar(
-                select(AgentRun).where(AgentRun.id == run_id).with_for_update()
-            )
+            run = session.scalar(select(AgentRun).where(AgentRun.id == run_id).with_for_update())
             if run is None:
                 return None
             if run.status not in {"failed", "interrupted", "cancelled"}:
@@ -698,7 +871,6 @@ class HarnessRepository:
             run.error_code = None
             run.error_message = None
             run.updated_at = now
-            run.version += 1
             self._append_event(session, run_id, "run_queued_for_resume", {})
             return self._run_dict(run)
 
@@ -708,9 +880,7 @@ class HarnessRepository:
             return status == "cancelled"
 
     @staticmethod
-    def _append_event(
-        session: Session, run_id: str, event_type: str, payload: dict
-    ) -> RunEvent:
+    def _append_event(session: Session, run_id: str, event_type: str, payload: dict) -> RunEvent:
         event = RunEvent(
             run_id=run_id,
             event_type=event_type,
