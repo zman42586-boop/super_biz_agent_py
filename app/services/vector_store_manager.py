@@ -32,6 +32,8 @@ class RetrievalOutcome:
     rewritten: bool
     reranker_used: bool
     source_types: tuple[str, ...]
+    reranker_succeeded: bool = False
+    error: str | None = None
 
 
 class VectorStoreManager:
@@ -237,10 +239,13 @@ class VectorStoreManager:
                         query_used = retry_query
 
             reranker_used = confidence.level == "medium"
+            reranker_succeeded = False
+            retrieval_error = None
             if reranker_used:
                 cross_scores: list[float] | None = None
                 try:
                     cross_scores = score_documents(query, [doc for doc, _ in candidates])
+                    reranker_succeeded = True
                     semantic_score = max(cross_scores, default=0.0)
                     if semantic_score < config.rag_semantic_evidence_threshold:
                         confidence = replace(
@@ -251,13 +256,15 @@ class VectorStoreManager:
                     else:
                         confidence = replace(confidence, semantic_score=semantic_score)
                 except Exception as semantic_error:
+                    retrieval_error = f"reranker_unavailable:{type(semantic_error).__name__}"
+                    confidence = replace(confidence, level="low")
                     logger.warning(f"Cross-Encoder 证据校验失败，回退 RRF: {semantic_error}")
                 docs = rerank_with_fallback(
                     query,
                     candidates,
                     k=k,
                     cross_scores=cross_scores,
-                )
+                ) if cross_scores is not None else self._unique_rrf_documents(candidates, k)
             elif confidence.level == "high":
                 docs = self._unique_rrf_documents(candidates, k, high_confidence_only=True)
             else:
@@ -285,11 +292,14 @@ class VectorStoreManager:
                 rewritten=rewritten,
                 reranker_used=reranker_used,
                 source_types=allowed_types,
+                reranker_succeeded=reranker_succeeded,
+                error=retrieval_error,
             )
         except Exception as e:
             logger.error(f"混合检索失败: {e}")
             confidence = ConfidenceResult(0.0, "low")
-            return RetrievalOutcome([], confidence, query, query, 1, False, False, allowed_types)
+            return RetrievalOutcome([], confidence, query, query, 1, False, False, allowed_types,
+                                    error=f"retrieval_unavailable:{type(e).__name__}")
 
     def _hybrid_candidates(
         self, query: str, candidate_count: int, expr: str | None

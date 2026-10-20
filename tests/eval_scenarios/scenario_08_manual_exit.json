@@ -20,18 +20,39 @@
         "cpu_percent": 15.0,
         "memory_percent": 40.0,
         "top_processes": [
-          {"name": "MATLAB.exe", "cpu": 5.0, "memory": 5.0}
+          {
+            "name": "MATLAB.exe",
+            "cpu": 5.0,
+            "memory": 5.0
+          }
         ]
       }
     }
   },
   "expected": {
-    "must_mention": ["不确定", "手动关闭"],
-    "should_mention": ["正常退出", "系统日志"],
-    "must_not_mention": ["栈溢出", "访问违规", "OOM Killer", "MEX 崩溃"]
+    "must_mention": [
+      "不确定",
+      "手动关闭"
+    ],
+    "should_mention": [
+      "正常退出",
+      "系统日志"
+    ],
+    "must_not_mention": [
+      "栈溢出",
+      "访问违规",
+      "OOM Killer",
+      "MEX 崩溃"
+    ]
   },
   "max_score": 10,
   "relevant_docs": [
     "matlab_error_codes_reference"
-  ]
+  ],
+  "data_provenance": {
+    "kind": "synthetic_fixture",
+    "real_injection_observed": false,
+    "human_relevance_review": "not_recorded",
+    "version": "evidence-boundary-v1"
+  }
 }

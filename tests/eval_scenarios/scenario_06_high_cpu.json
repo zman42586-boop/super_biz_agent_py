@@ -14,20 +14,61 @@
     "ts": "2026-05-18T16:30:00",
     "evidence": {
       "recent_points": [
-        ["16:25", 92.0], ["16:26", 94.0], ["16:27", 93.5],
-        ["16:28", 95.0], ["16:29", 94.2], ["16:30", 95.0]
+        [
+          "16:25",
+          92.0
+        ],
+        [
+          "16:26",
+          94.0
+        ],
+        [
+          "16:27",
+          93.5
+        ],
+        [
+          "16:28",
+          95.0
+        ],
+        [
+          "16:29",
+          94.2
+        ],
+        [
+          "16:30",
+          95.0
+        ]
       ]
     }
   },
   "expected": {
-    "must_mention": ["CPU", "正常", "仿真", "负载"],
-    "should_mention": ["计算密集型", "parfor", "无异常"],
-    "must_not_mention": ["崩溃", "栈溢出", "内存泄漏"]
+    "must_mention": [
+      "CPU",
+      "正常",
+      "仿真",
+      "负载"
+    ],
+    "should_mention": [
+      "计算密集型",
+      "parfor",
+      "无异常"
+    ],
+    "must_not_mention": [
+      "崩溃",
+      "栈溢出",
+      "内存泄漏"
+    ]
   },
   "max_score": 10,
   "relevant_docs": [
     "cpu_high_usage",
     "matlab_profiler_guide",
     "matlab_official_cpu_performance_runbook"
-  ]
+  ],
+  "data_provenance": {
+    "kind": "synthetic_fixture",
+    "real_injection_observed": false,
+    "human_relevance_review": "not_recorded",
+    "version": "evidence-boundary-v1"
+  }
 }

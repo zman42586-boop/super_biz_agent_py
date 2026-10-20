@@ -151,12 +151,15 @@ class AlertService:
             return record.diagnosis_run_id
 
         repository = await asyncio.to_thread(self._repository_factory)
+        from app.harness.monitoring import HostMonitoringRepository
+
+        history = await asyncio.to_thread(HostMonitoringRepository(repository).get_history, record.host)
         run = await asyncio.to_thread(
             repository.create_run,
             task=build_alert_diagnosis_task(record),
             session_id=f"alert_{record.alert_id}",
             kind="alert_diagnosis",
-            payload={"alert": record.model_dump(mode="json")},
+            payload={"alert": record.model_dump(mode="json"), "host": record.host, "history": history},
         )
         record.diagnosis_run_id = str(run["id"])
         logger.info(f"告警 {record.alert_id} 已创建持久化诊断 Run: {record.diagnosis_run_id}")

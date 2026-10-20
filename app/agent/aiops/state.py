@@ -35,3 +35,17 @@ class PlanExecuteState(TypedDict):
 
     # LoopGuard 最近一次触发快照；Harness 会随 state_json 一起持久化。
     loop_guard: NotRequired[dict[str, Any]]
+    evidence_registry: NotRequired[dict[str, dict[str, Any]]]
+    diagnosis_context: NotRequired[dict[str, Any]]
+    candidate_diagnosis: NotRequired[dict[str, Any]]
+    candidate_verified: NotRequired[bool]
+    verified_fingerprint: NotRequired[str]
+    verification: NotRequired[dict[str, Any]]
+    verification_attempts: NotRequired[int]
+    verification_history: NotRequired[list[dict[str, Any]]]
+    verification_fingerprints: NotRequired[list[str]]
+    phase: NotRequired[str]
+    safe_stop_reason: NotRequired[str]
+    tool_calls: NotRequired[list[dict[str, Any]]]
+    prefetch_tool_calls: NotRequired[int]
+    deadline_at: NotRequired[str]

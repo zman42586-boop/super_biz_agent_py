@@ -99,11 +99,12 @@ class HarnessWorker:
             self.worker_id,
             run["version"],
             (run.get("input") or {}).get("host") if offline else None,
-            (run.get("input") or {}).get("history") if offline else None,
+            (run.get("input") or {}).get("history"),
+            (run.get("input") or {}).get("host") or ((run.get("input") or {}).get("alert") or {}).get("host"),
         )
         heartbeat_stop, lost = asyncio.Event(), asyncio.Event()
         with harness_run_context(context):
-            execution = asyncio.create_task(self._execute_claimed_run(run))
+            execution = asyncio.create_task(self._execute_budgeted_run(run))
             heartbeat = asyncio.create_task(
                 self._lease_heartbeat(run, heartbeat_stop, lost, execution)
             )
@@ -150,6 +151,16 @@ class HarnessWorker:
 
         await dispatch_notifications(self.repository)
         return True
+
+    async def _execute_budgeted_run(self, run: dict[str, Any]) -> None:
+        remaining, state = await asyncio.to_thread(
+            self.repository.reserve_run_deadline, run["id"], self.settings.run_timeout_seconds
+        )
+        run["state"] = state
+        if remaining <= 0:
+            raise TimeoutError("Cumulative Run deadline expired before recovery")
+        async with asyncio.timeout(remaining):
+            await self._execute_claimed_run(run)
 
     async def _execute_claimed_run(self, run: dict[str, Any]) -> None:
         run_id = str(run["id"])

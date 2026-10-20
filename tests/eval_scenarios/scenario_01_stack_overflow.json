@@ -20,21 +20,49 @@
         "cpu_percent": 45.2,
         "memory_percent": 62.1,
         "top_processes": [
-          {"name": "MATLAB.exe", "cpu": 35.0, "memory": 18.0},
-          {"name": "svchost.exe", "cpu": 5.0, "memory": 2.0}
+          {
+            "name": "MATLAB.exe",
+            "cpu": 35.0,
+            "memory": 18.0
+          },
+          {
+            "name": "svchost.exe",
+            "cpu": 5.0,
+            "memory": 2.0
+          }
         ]
       }
     }
   },
   "expected": {
-    "must_mention": ["栈溢出", "test_stack_overflow", "迭代", "递归深度"],
-    "should_mention": ["dbstack", "递归深度限制", "迭代替代"],
-    "must_not_mention": ["OOM", "越界", "访问违规", "内存泄漏"]
+    "must_mention": [
+      "栈溢出",
+      "test_stack_overflow",
+      "迭代",
+      "递归深度"
+    ],
+    "should_mention": [
+      "dbstack",
+      "递归深度限制",
+      "迭代替代"
+    ],
+    "must_not_mention": [
+      "OOM",
+      "越界",
+      "访问违规",
+      "内存泄漏"
+    ]
   },
   "max_score": 10,
   "relevant_docs": [
     "matlab_stack_overflow_guide",
     "matlab_error_codes_reference",
     "matlab_profiler_guide"
-  ]
+  ],
+  "data_provenance": {
+    "kind": "synthetic_fixture",
+    "real_injection_observed": false,
+    "human_relevance_review": "not_recorded",
+    "version": "evidence-boundary-v1"
+  }
 }

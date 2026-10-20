@@ -6,16 +6,8 @@ from collections.abc import Callable
 from typing import Any
 
 from langchain_core.documents import Document
+from app.evaluation.retrieval import legacy_file_metrics
 
-
-def _doc_matches(doc_filename: str, relevant_doc: str) -> bool:
-    name_lower = doc_filename.lower()
-    rel_lower = relevant_doc.lower()
-    if rel_lower in name_lower:
-        return True
-    return rel_lower.replace(".md", "").replace("_", " ") in name_lower.replace(
-        ".md", ""
-    ).replace("_", " ")
 
 
 def _document_name(doc: Document) -> str:
@@ -26,7 +18,7 @@ def _deduplicate(names: list[str]) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
     for name in names:
-        key = name.lower()
+        key = name.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".md")
         if key and key not in seen:
             seen.add(key)
             result.append(name)
@@ -39,7 +31,6 @@ def build_eval_query(scenario: dict[str, Any]) -> str:
     evidence = alert.get("evidence", {})
     parts = [
         alert.get("alert_name", ""),
-        scenario.get("description", ""),
         f"指标 {alert.get('metric', '')}",
         evidence.get("crash_type", ""),
         str(evidence.get("crash_log", ""))[:800],
@@ -70,40 +61,11 @@ def build_eval_query(scenario: dict[str, Any]) -> str:
 def calculate_metrics(
     relevant_docs: list[str], retrieved_docs: list[str], top_k: int
 ) -> dict[str, Any]:
-    """按唯一文档名计算指标，避免同一来源的多个分块重复计数。"""
-    retrieved = _deduplicate(retrieved_docs)[:top_k]
-    if not relevant_docs:
-        return {
-            "relevant_docs": [],
-            "retrieved_docs": retrieved,
-            "recall_at_k": 1.0,
-            "precision_at_k": 1.0,
-            "mrr": 1.0,
-        }
+    """Legacy positive-only document labels; fixed K and exact filename stems."""
+    result = legacy_file_metrics(relevant_docs, retrieved_docs, top_k)
+    return {**result, "relevant_docs": relevant_docs,
+            "retrieved_docs": _deduplicate(retrieved_docs)[:top_k]}
 
-    matched = sum(
-        any(_doc_matches(name, relevant) for name in retrieved)
-        for relevant in relevant_docs
-    )
-    useful = sum(
-        any(_doc_matches(name, relevant) for relevant in relevant_docs)
-        for name in retrieved
-    )
-    reciprocal_rank = next(
-        (
-            1.0 / rank
-            for rank, name in enumerate(retrieved, 1)
-            if any(_doc_matches(name, relevant) for relevant in relevant_docs)
-        ),
-        0.0,
-    )
-    return {
-        "relevant_docs": relevant_docs,
-        "retrieved_docs": retrieved,
-        "recall_at_k": matched / len(relevant_docs),
-        "precision_at_k": useful / len(retrieved) if retrieved else 0.0,
-        "mrr": reciprocal_rank,
-    }
 
 
 def compute_metrics(

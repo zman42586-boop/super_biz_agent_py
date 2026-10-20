@@ -9,6 +9,7 @@ from loguru import logger
 from transformers import AutoTokenizer
 
 from app.config import config
+from app.services.document_identity import document_metadata, section_metadata
 
 
 class DocumentSplitterService:
@@ -65,6 +66,7 @@ class DocumentSplitterService:
             parent_docs = self.markdown_splitter.split_text(content)
             final_docs: list[Document] = []
             document_title = self._document_title(content, Path(file_path).stem)
+            identity = document_metadata(file_path, content)
             for parent_index, parent in enumerate(parent_docs):
                 parent_content = parent.page_content.strip()
                 header_path = " > ".join(
@@ -94,7 +96,8 @@ class DocumentSplitterService:
                     doc.page_content = f"{context_prefix}\n\n{child_content}" if context_prefix else child_content
                     doc.metadata.update(
                         {
-                            "_parent_id": f"{Path(file_path).name}:{parent_index}",
+                            **identity,
+                            **section_metadata(identity, parent_index, child_index),
                             "_parent_content": parent_content,
                             "_child_content": child_content,
                             "_child_index": child_index,
@@ -145,11 +148,13 @@ class DocumentSplitterService:
                     }
                 ],
             )
+            identity = document_metadata(file_path, content)
             for index, doc in enumerate(docs):
                 child_content = doc.page_content
                 doc.metadata.update(
                     {
-                        "_parent_id": f"{Path(file_path).name}:0",
+                        **identity,
+                        **section_metadata(identity, 0, index),
                         "_parent_content": content,
                         "_child_content": child_content,
                         "_child_index": index,

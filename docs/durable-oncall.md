@@ -43,7 +43,7 @@
 API 启动即扫描数据库中的注册主机
   30 秒无心跳：suspected_down；60 秒无心跳：down
   同一事务：失联轮次 + 即时通知 + pending 诊断 Run
-Worker -> Planner -> Executor -> Replanner
+Worker -> Planner -> Executor -> Microcompact -> Replanner -> Evidence Verifier -> Final Report
   read_host_history + RAG；实时 MCP / search_log unavailable
   事实 / 检索证据 / 推断 -> 原子完成 + 诊断通知
 恢复心跳 -> online，告警 resolved
@@ -79,4 +79,10 @@ MySQL 强制终止测试需要**空的专用测试库**，安全注入 HARNESS_T
 
 未提供变量明确 skip。测试启动 A 子进程并 terminate，B/C 保持运行，验证超时回收、Checkpoint 恢复、旧 Token 拒绝。SQLite 并发结果不能冒充 MySQL 行锁/隔离级别实测。还需人工运行真实 MATLAB 日志、停止心跳，检查真实 MySQL Run、Worker 事件、模型报告和邮件。
 
-本次本地验证（2026-10-11，Python 3.11）：除 test_document_splitter_v2.py 和 test_adaptive_retrieval.py 外的回归为 99 passed、1 skipped（MySQL）。全量命令因缺少 transformers 在收集阶段失败；单独执行自适应检索得到 6 failed，均因缺少 google.protobuf，未完成检索逻辑验证。生产图测试替换模型、RAG、记忆写入和 SMTP；HTTP/日志轮转测试采用 SQLite 与确定性图节点。未运行真实 MySQL、MATLAB、Milvus、模型 API 或 SMTP 验收。不要把这些本地结果视为生产依赖已通过。
+最新验收（2026-10-20）：完整项目虚拟环境回归158 passed、2 skipped（未启用真实MySQL测试）。随后在独立临时MySQL库运行这两项得到2 passed，验证强制终止/接管/Fencing及Verifier计数、phase、deadline保留。Milvus、Embedding、CrossEncoder真实检索评测及两个合成场景的真实模型/Judge冒烟均已完成；MATLAB故障注入和SMTP交付未实测。详见 [本轮验收报告](aiops-improvement-20261020.md)。
+
+## Evidence Verifier 状态恢复
+
+本轮沿用MySQL JSON快照，无新增表列。phase、evidence_registry、candidate_diagnosis、verification及历史、验证次数/指纹和deadline_at随节点更新保存。Verifier调用前先持久化预留，恢复不能刷新验证次数；同候选同证据会安全结束。第一认领时确定总deadline，接管或人工resume不重新获得300秒。
+
+普通进程告警同样冻结已留存历史并可用read_host_history。实时MCP只返回当前采样，search_log仍是FastAPI本地日志。完整协议与状态图见 [Evidence Verifier说明](evidence-verification.md)。

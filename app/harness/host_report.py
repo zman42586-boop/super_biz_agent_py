@@ -47,6 +47,8 @@ def format_host_report(run, generated, repository):
         + ("\n\n".join(retrieved) or "无成功检索记录。")
         + "\n检索内容为参考案例，不能证明本次事故根因。"
         + "\n\n## 分析推断\n原因未确定。心跳失联不足以确定主机物理状态。"
-        + "\n以下模型分析尚未验证，需结合网络、采集器和恢复后的主机日志核查：\n\n"
+        + ("\n以下为证据验证流程生成的结构化报告：\n\n"
+           if (run.get("state") or {}).get("phase") == "complete"
+           else "\n以下模型分析尚未验证，需结合网络、采集器和恢复后的主机日志核查：\n\n")
         + generated
     )

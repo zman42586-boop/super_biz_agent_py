@@ -17,6 +17,7 @@ from app.services.retrieval_context import (
 def retrieve_knowledge(
     query: str,
     mode: Literal["diagnostic", "plan"] = "diagnostic",
+    source_types: list[Literal["official", "case", "incident", "knowledge"]] | None = None,
 ) -> tuple[str, list[Document]]:
     """从知识库中检索相关信息来回答问题
 
@@ -40,7 +41,7 @@ def retrieve_knowledge(
         logger.info(f"知识检索工具被调用: query='{query}'")
 
         # 从向量存储中检索相关文档
-        outcome = vector_store_manager.search_with_diagnostics(query, k=config.rag_top_k)
+        outcome = vector_store_manager.search_with_diagnostics(query, k=config.rag_top_k, source_types=source_types)
         docs = outcome.documents
 
         if not docs:

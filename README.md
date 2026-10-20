@@ -16,7 +16,7 @@
 - Worker 恢复：运行期间周期回收租约；每次认领递增现有 `version` 作为 Fencing Token，续租及普通写入不递增；关键写入校验所有权，旧 Worker 无法覆盖接管后的状态。
 - 失联降级：实时 MCP / `search_log` 标记 unavailable，使用历史证据与 RAG，事实/检索/推断分开，原因保守标记“原因未确定”。
 - RAG 诊断：Dense 向量召回 + Milvus BM25 稀疏召回，经 RRF 融合后按置信度决定是否查询改写、重试和交叉编码重排。
-- 证据约束：最终上下文分为“事实、检索证据、推断”；证据不足时明确输出“原因未确定”和需补充的日志。
+- 证据验证：原始事实和知识先登记 Evidence ID，再经确定性引用校验和独立 LLM 语义验证；只渲染验证后的结构化结论，失败时有限修正或报告“原因未确定”。
 - 分层记忆：诊断报告先写入 `memory/incidents/` 留档；LLM Judge 评估知识价值，高价值低风险案例自动入库，模糊或高风险案例转人工审核，只有 `approved` 内容能进入 Milvus 和 Planner 上下文。
 - 评测：支持 Recall@5、Precision@5、MRR、nDCG@5、Hit@1、拒答率、重试率、重排率和延迟统计；生成质量由独立 LLM Judge 评分。
 
@@ -34,7 +34,7 @@
                         |
                         +-- 告警去重与邮件
                         `-- MySQL pending Run -> Harness Worker
-                                `-- LangGraph Planner -> Executor -> Replanner
+                                `-- LangGraph Planner -> Executor -> Microcompact -> Replanner -> Evidence Verifier -> Final Report
                                 |
                                 +-- Milvus 混合检索与证据置信度
                                 +-- MCP 实时指标/本地日志工具
@@ -44,7 +44,7 @@
                                         `-- 离线时由独立 Judge 模型评分
 ```
 
-注意：DeepSeek Flash 负责生成诊断；DeepSeek Pro 只在评测脚本中作为 Judge 使用，不在每次线上告警中强制执行。使用不同模型能降低“同一模型生成后再给自己打分”的相关性偏差，但不能消除 Judge 偏差，所以仍需人工标注集和规则指标。
+注意：DeepSeek Flash 负责候选诊断及独立 Prompt 的在线 Evidence Verifier；DeepSeek Pro 只在评测脚本中作为 Judge 使用。在线验证复用同一模型，仍存在相关性偏差，需要人工抽检。使用不同模型能降低“同一模型生成后再给自己打分”的相关性偏差，但不能消除 Judge 偏差，所以仍需人工标注集和规则指标。
 
 ## RAG 实现
 
@@ -52,7 +52,7 @@
 
 ### 文档与切分
 
-仓库目前包含 36 篇 MATLAB/AIOps 文档和 50 篇通用 OnCall 文档。`aiops-docs/` 中新增了 MathWorks 官方排障摘要以及公开案例的工程化整理；文件是 Markdown，但不是把网页原文整页复制进仓库。
+仓库目前包含 36 篇 MATLAB/AIOps 文档和 50 篇通用 OnCall 文档。`aiops-docs/` 中新增了 MathWorks 官方排障摘要以及公开案例的工程化整理；文件是 Markdown，但不是把网页原文整页复制进仓库。新索引 metadata 包含基于来源与内容版本的 document/parent/chunk ID；已有 Milvus 不会自动重建，离线 live_pool 可只读映射旧 ID。
 
 Markdown 先按 H1/H2 划分 parent，再在每个 parent 内按 BGE tokenizer 切 child：
 
@@ -72,7 +72,7 @@ Markdown 先按 H1/H2 划分 parent，再在每个 parent 内按 BGE tokenizer �
 | 融合 | Reciprocal Rank Fusion | RRF k=60 |
 | 候选 | 融合后去重 | 20 |
 | 重排 | `BAAI/bge-reranker-base` CrossEncoder | 权重 0.20 |
-| 输出 | 文档级去重 | Top 5 |
+| 输出 | Parent 章节级去重 | Top 5 |
 
 BM25 属于召回阶段，不是重排器。它依靠词频、逆文档频率和文档长度归一化，擅长匹配错误码、函数名和日志关键词。Dense 召回把查询和文档分别编码成向量，IP 在归一化 BGE 向量上等价于余弦相似度。CrossEncoder 则把“查询 + 候选文档”一起送进模型逐对打分，通常更准但 CPU 延迟明显更高。
 
@@ -182,54 +182,26 @@ ONCALL_MONITOR_CRASH_PATTERN=matlab_crash_dump.*
 ONCALL_TEMP_ENABLED=false
 ```
 
-## 评测与已验证结果
+## 评测与验收（2026-10-20）
 
-运行单元/集成测试：
+检索评测与诊断正确性分别验收。40 条查询和 10 条域外查询来自旧合成开发集，原 `relevant_docs` 没有可追溯人工复核记录，不是全库相关性真值。本轮修复了文件/Parent 混用导致 nDCG 超过 1、Precision 分母不一致、隐藏场景描述进入查询和技术失败被记成正确拒答的问题。旧 README 的 85% Recall 等记录不再作为当前效果结论。
+
+新流程：固定语料快照 → Dense/BM25/精确词/标题元数据 Pooling → 人工 0/1/2 标注 → 固定数据集版本 → 同快照评测。未标注结果保持 unknown；主指标返回待补标，Recall 明确为已标注候选池的近似值。详见 [检索评测说明](docs/retrieval-evaluation.md)。
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest --no-cov
+.\scripts\test_mysql_disposable.ps1
+.\.venv\Scripts\python.exe -m app.evaluation.live_pool --queries tests/retrieval_queries_v3.json --output-dir work/live-pool-v1
 ```
 
-运行真实 Milvus 检索对照和自适应评测：
+已有评测入口继续保留，但输出明确标记 legacy 文件级标签和 MRR@5。`eval_runner` 的合成场景模式禁用现场工具、Planner 记忆及 Incident 写入，并记录输入/标签/语料/配置指纹；线上模型不可用或指标缺失时不能通过回归门禁。
 
-本次新增的故障与降级测试、MySQL 实测入口及替换依赖的验收边界见 [测试说明](docs/durable-oncall.md#验收与限制)。以下 RAG 结果是仓库原有评测记录，不是本次变更新运行的结果。
+- [诊断验证与状态流转](docs/evidence-verification.md)
+- [源码核查、改动清单与测试结果](docs/aiops-improvement-20261020.md)
+- [MCP 与故障证据数据链路](docs/mcp-evidence-audit.md)
+- [安全 MATLAB 样本与执行边界](tests/fault_injection/README.md)
 
-```powershell
-.\.venv\Scripts\python.exe -m tests.eval_retrieval_v2
-.\.venv\Scripts\python.exe -m tests.eval_adaptive_retrieval
-```
-
-### 第一轮：固定检索链对照（40 queries）
-
-| 方案 | Recall@5 | Precision@5 | MRR | nDCG@5 | Hit@1 |
-|---|---:|---:|---:|---:|---:|
-| Dense 原查询 | 68.33% | 30.00% | 0.8121 | 0.6710 | 75.00% |
-| Dense + 查询扩展 | 76.67% | 34.50% | 0.8600 | 0.7589 | 82.50% |
-| Dense + BM25 + RRF | 82.92% | 37.00% | **0.8875** | 0.8057 | **85.00%** |
-| Hybrid + CrossEncoder(0.20) | **83.75%** | **37.50%** | 0.8833 | **0.8103** | **85.00%** |
-
-CrossEncoder 平均总延迟约 4.86 秒，而不重排的 Hybrid 约 34 毫秒。因此第二轮没有对所有查询无条件重排。
-
-### 第二轮：自适应检索（40 answerable + 10 no-answer）
-
-| 指标 | 结果 |
-|---|---:|
-| Recall@5 | 85.00% |
-| Precision@5 | 38.00% |
-| MRR | 0.8979 |
-| nDCG@5 | 0.8204 |
-| Hit@1 | 85.00% |
-| 不可回答查询正确拒答率 | 100.00% |
-| 可回答查询低置信度误拒率 | 2.50% |
-| 查询重试率 | 46.00% |
-| CrossEncoder 使用率 | 56.00% |
-| 平均 / P95 延迟 | 4.30s / 6.84s |
-
-这里的 100% 只表示这 10 条人工构造的 out-of-domain 查询全部被拒答，不代表真实环境 100% 准确。当前集合规模很小，而且开发集与留出集属于相同故障类别，后续应增加真实 dump、跨版本 MATLAB 日志、难负例，并由不同人员盲标。
-
-### LLM-as-Judge
-
-`tests/eval_runner.py` 先完成检索和诊断，再调用 `EVAL_JUDGE_MODEL` 独立评分：根因准确性 0–4、证据引用 0–3、建议可操作性 0–3。Judge 是生成质量评测，不应与 Recall@K 等检索指标混为一谈，也不能替代人工验收。
+正式验收结果、真实依赖测试和未完成事项均集中记录在核查报告中。MATLAB 样本默认仅预览，不会向现有仿真任务注入故障；本轮不实现自动修复。
 
 ## 目录说明
 
@@ -250,6 +222,7 @@ vector-database.yml       Milvus/etcd/MinIO/Attu
 - “进程消失”不等于一定崩溃，用户正常退出也可能触发；是否为 crash 仍需 dump/事件日志佐证。
 - 当前 CPU/内存主要是系统级和进程快照，不是 MATLAB 内部 profiler 指标。
 - 温度依赖 LibreHardwareMonitor；未启动其 Web Server 时不会获得温度。
+- 在线 Verifier 与生成器复用同一模型，语义判断仍有偏差；SUPPORTED 只代表当前候选通过验证，root_cause=null 时仍然没有确认根因。
 - 本地 CrossEncoder 在 CPU 上延迟较高；生产化可考虑 ONNX/量化、GPU 或更小的 reranker。
 - 知识库中的案例是公开资料整理与合成 runbook，不能替代组织自己的真实事故数据。
 

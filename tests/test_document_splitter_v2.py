@@ -36,3 +36,17 @@ def test_only_curated_official_filename_gets_high_trust() -> None:
     assert {doc.metadata["_source_type"] for doc in guide} == {"knowledge"}
     assert {doc.metadata["_source_type"] for doc in official} == {"official"}
     assert {doc.metadata["_trust_level"] for doc in official} == {"high"}
+
+
+def test_ids_are_stable_versioned_and_do_not_collide_for_same_named_sources():
+    service = DocumentSplitterService()
+    content = "# Guide\n\n## Memory\n\nallocation failed"
+    first = service.split_markdown(content, "a/same.md")[0].metadata
+    again = service.split_markdown(content, "a/same.md")[0].metadata
+    other = service.split_markdown(content, "b/same.md")[0].metadata
+    changed = service.split_markdown(content + " new information", "a/same.md")[0].metadata
+    assert first["_chunk_id"] == again["_chunk_id"]
+    assert first["_document_id"] != other["_document_id"]
+    assert first["_document_id"] == changed["_document_id"]
+    assert first["_document_version"] != changed["_document_version"]
+    assert first["_parent_id"] != changed["_parent_id"]

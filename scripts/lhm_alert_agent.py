@@ -216,7 +216,7 @@ def parse_crash_dump(filepath: str) -> dict:
     raw_header = raw[:3000] if len(raw) > 3000 else raw
 
     # 检测崩溃类型
-    upper = raw[:2000].upper()
+    normalized = raw[:2000].lower()
     keywords_map = [
         ("stack overflow", "stack_overflow"),
         ("access violation", "access_violation"),
@@ -226,7 +226,7 @@ def parse_crash_dump(filepath: str) -> dict:
         ("out of memory", "out_of_memory"),
     ]
     for keyword, ctype in keywords_map:
-        if keyword in upper:
+        if keyword in normalized:
             crash_type = ctype
             break
 
@@ -252,6 +252,9 @@ def parse_crash_dump(filepath: str) -> dict:
                 break
 
     return {
+        "dump_source": os.path.basename(filepath),
+        "dump_modified_at": datetime.fromtimestamp(os.path.getmtime(filepath), UTC).isoformat(),
+        "dump_sha256": __import__("hashlib").sha256(raw.encode("utf-8")).hexdigest(),
         "crash_type": crash_type,
         "stack_trace": "\n".join(stack_lines) if stack_lines else "(未找到调用栈)",
         "raw_snippet": raw_header,
@@ -405,6 +408,8 @@ def send_process_exit_alert(process_name: str, crash_info: dict, snapshot: dict)
         "crash_type": crash_type,
         "monitored_process": process_name,
         "system_snapshot": snapshot,
+        "extra": {key: crash_info[key] for key in ("dump_source", "dump_modified_at", "dump_sha256", "stack_trace")
+                  if crash_info.get(key)},
     }
 
     # 如果有调用栈，提取第一行到 alert_name 中
@@ -569,7 +574,7 @@ def main() -> None:
 
     # 进程监控状态
     last_process_pid: int | None = None
-    last_crash_mtime: float = 0  # 避免重复发送同一崩溃日志的告警
+    last_crash_mtime: float = time.time()  # 避免重复发送同一崩溃日志的告警
     process_was_alive = False
 
     # 首次检测进程是否存活

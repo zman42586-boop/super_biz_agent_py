@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import time
+from datetime import UTC, datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ class ToolExecutionResult:
     cached: bool = False
     artifact_path: str | None = None
     structured_content: dict[str, Any] | None = None
+    evidence: list[dict[str, Any]] | None = None
 
 
 def _safe_json(value: Any) -> Any:
@@ -140,10 +142,15 @@ class ToolGateway:
         arguments: dict[str, Any],
         step_id: int | None = None,
         step_index: int = 0,
+        evidence_context: dict | None = None,
+        call_history: list[dict] | None = None,
+        budget_offset: int = 0,
     ) -> ToolExecutionResult:
         tool_name = str(getattr(tool, "name", getattr(tool, "__name__", "unknown")))
         policy = self.policies.get(tool_name, ToolPolicy())
         validated = _validate_arguments(tool, arguments)
+        if tool_name == "retrieve_knowledge" and (evidence_context or {}).get("evaluation_mode"):
+            validated["source_types"] = ["official", "case", "knowledge"]
         context = get_run_context()
         if (
             context
@@ -187,7 +194,7 @@ class ToolGateway:
             )
             if not cached_in_step:
                 guard_decision = self.loop_guard.evaluate_tool_call(
-                    tool_name, validated, existing_calls
+                    tool_name, validated, existing_calls + [{} for _ in range(budget_offset)]
                 )
                 if not guard_decision.allowed:
                     payload = guard_decision.event_payload("tool_call")
@@ -218,7 +225,17 @@ class ToolGateway:
                     cached=True,
                     artifact_path=call_row.get("result_artifact_path"),
                     structured_content=result.get("structured_content"),
+                    evidence=result.get("evidence", []),
                 )
+
+        if context is None and call_history is not None:
+            decision = self.loop_guard.evaluate_tool_call(
+                tool_name, validated, call_history + [{} for _ in range(budget_offset)]
+            )
+            if not decision.allowed:
+                raise ToolExecutionError(f"LOOP_GUARD_{decision.reason.upper()}", decision.message)
+            call_history.append({"tool_name": tool_name, "arguments": validated,
+                                 "started_at": datetime.now(UTC).isoformat()})
 
         # A non-read-only request may have succeeded despite a lost response.
         attempts = max(1, policy.max_retries + 1) if policy.read_only else 1
@@ -255,6 +272,9 @@ class ToolGateway:
                         "Lost lease during tool invocation; remote execution may have completed"
                     )
                 result_text, structured_content = _prepared_result(tool_name, raw_result)
+                from app.agent.aiops.evidence import tool_evidence
+
+                evidence = tool_evidence(tool_name, raw_result, evidence_context or {})
                 content, artifact_path, structured_content = await asyncio.to_thread(
                     self._limit_result,
                     context.run_id if context else "adhoc",
@@ -271,6 +291,7 @@ class ToolGateway:
                         result={
                             "content": content,
                             "structured_content": structured_content,
+                            "evidence": evidence,
                         },
                         latency_ms=latency_ms,
                         artifact_path=artifact_path,
@@ -282,6 +303,7 @@ class ToolGateway:
                     latency_ms=latency_ms,
                     artifact_path=artifact_path,
                     structured_content=structured_content,
+                    evidence=evidence,
                 )
             except BaseException as exc:
                 from app.harness.repository import LeaseLostError
@@ -324,6 +346,7 @@ class ToolGateway:
                             cached=True,
                             artifact_path=call_row.get("result_artifact_path"),
                             structured_content=result.get("structured_content"),
+                            evidence=result.get("evidence", []),
                         )
 
         raise last_error or ToolExecutionError("TOOL_EXECUTION_FAILED", "Unknown tool error")
@@ -331,6 +354,9 @@ class ToolGateway:
     @staticmethod
     async def _invoke(tool: Any, arguments: dict[str, Any]) -> Any:
         if hasattr(tool, "ainvoke"):
+            if getattr(tool, "response_format", "") == "content_and_artifact":
+                return await tool.ainvoke({"name": tool.name, "args": arguments,
+                                          "id": "evidence-retrieval", "type": "tool_call"})
             return await tool.ainvoke(arguments)
         if hasattr(tool, "invoke"):
             return await asyncio.to_thread(tool.invoke, arguments)

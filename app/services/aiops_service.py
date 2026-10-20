@@ -6,13 +6,17 @@
 import asyncio
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime, timedelta
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from loguru import logger
 
 from app.agent.aiops import PlanExecuteState, executor, microcompact, planner, replanner
+from app.agent.aiops.evidence import register, seed_evidence, utc_time
+from app.agent.aiops.verifier import evidence_verifier, final_report
 from app.harness.config import harness_settings
 from app.harness.repository import LeaseLostError
 from app.harness.runtime import get_run_context
@@ -42,76 +46,57 @@ class AIOpsService:
         logger.info("Plan-Execute-Replan Service 初始化完成")
 
     def _build_graph(self):
-        """构建 Plan-Execute-Replan 工作流"""
-        logger.info("构建工作流图...")
-
-        # 创建状态图
         workflow = StateGraph(PlanExecuteState)
+        nodes = {NODE_PLANNER: (planner, NODE_EXECUTOR),
+                 NODE_EXECUTOR: (executor, NODE_MICROCOMPACT),
+                 NODE_MICROCOMPACT: (microcompact, NODE_REPLANNER),
+                 NODE_REPLANNER: (replanner, "verifier"),
+                 "verifier": (evidence_verifier, "final_report"),
+                 "final_report": (final_report, "complete")}
 
-        # 添加节点
-        workflow.add_node(NODE_PLANNER, planner)  # 制定计划
-        workflow.add_node(NODE_EXECUTOR, executor)  # 执行步骤
-        workflow.add_node(NODE_MICROCOMPACT, microcompact)  # Level 2: 压缩大工具结果
-        workflow.add_node(NODE_REPLANNER, replanner)  # 重新规划
+        def wrap(function, next_phase):
+            async def node(state: PlanExecuteState, config: RunnableConfig):
+                deadline = utc_time(state.get("deadline_at"))
+                if next_phase != "complete" and deadline and datetime.now(UTC) >= deadline:
+                    return await final_report({**state, "candidate_verified": False,
+                                               "safe_stop_reason": "累计执行时限耗尽",
+                                               "verification": {"status": "NON_SUPPORTED", "reason": "累计执行时限耗尽"}})
+                # Microcompact is the only existing node needing RunnableConfig.
+                output = await function(state, config) if function is microcompact else await function(state)
+                output = dict(output or {})
+                output.setdefault("phase", next_phase)
+                return output
+            return node
 
-        # 新任务从 Planner 开始；持久化任务恢复时从尚未完成的节点继续。
-        def choose_entry(state: PlanExecuteState) -> str:
-            if state.get("response"):
+        for name, (function, phase) in nodes.items():
+            workflow.add_node(name, wrap(function, phase))
+
+        def choose_entry(state):
+            phase = state.get("phase")
+            if phase == "complete" and state.get("response"):
                 return END
+            if phase in nodes:
+                return phase
+            # Old snapshots have no durable graph phase. Legacy prose cannot
+            # bypass verification; regenerate a structured candidate instead.
+            if state.get("response"):
+                return NODE_REPLANNER
             if state.get("plan"):
                 return NODE_EXECUTOR
             if state.get("past_steps"):
                 return NODE_REPLANNER
             return NODE_PLANNER
 
-        workflow.add_conditional_edges(
-            START,
-            choose_entry,
-            {
-                NODE_PLANNER: NODE_PLANNER,
-                NODE_EXECUTOR: NODE_EXECUTOR,
-                NODE_REPLANNER: NODE_REPLANNER,
-                END: END,
-            },
-        )
+        def route(state):
+            phase = state.get("phase")
+            return END if phase == "complete" else phase
 
-        # 定义边：planner → executor → microcompact → replanner
-        workflow.add_edge(NODE_PLANNER, NODE_EXECUTOR)
-        workflow.add_edge(NODE_EXECUTOR, NODE_MICROCOMPACT)
-        workflow.add_edge(NODE_MICROCOMPACT, NODE_REPLANNER)
-
-        # replanner 的条件边
-        def should_continue(state: PlanExecuteState) -> str:
-            """判断是否继续执行"""
-            # 如果已经生成了最终响应，结束
-            if state.get("response"):
-                logger.info("已生成最终响应，结束流程")
-                return END
-
-            # 如果还有计划步骤，继续执行
-            plan = state.get("plan", [])
-            if plan:
-                logger.info(f"继续执行，剩余 {len(plan)} 个步骤")
-                return NODE_EXECUTOR
-
-            # 计划为空但没有响应，返回 replanner 生成响应
-            logger.info("计划执行完毕，生成最终响应")
-            return END
-
-        workflow.add_conditional_edges(
-            NODE_REPLANNER,
-            should_continue,
-            {
-                NODE_EXECUTOR: NODE_EXECUTOR,
-                END: END,
-            },
-        )
-
-        # 编译工作流
-        compiled_graph = workflow.compile(checkpointer=self.checkpointer)
-
-        logger.info("工作流图构建完成")
-        return compiled_graph
+        targets = {name: name for name in nodes}
+        targets[END] = END
+        workflow.add_conditional_edges(START, choose_entry, targets)
+        for name in nodes:
+            workflow.add_conditional_edges(name, route, targets)
+        return workflow.compile(checkpointer=self.checkpointer)
 
     async def execute(
         self,
@@ -119,6 +104,7 @@ class AIOpsService:
         session_id: str = "default",
         initial_state: PlanExecuteState | None = None,
         execution_id: str | None = None,
+        evidence_payload: dict | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         执行 Plan-Execute-Replan 流程
@@ -134,7 +120,7 @@ class AIOpsService:
 
         try:
             # 初始化状态；Harness 恢复时传入最后一次持久化快照。
-            graph_input: PlanExecuteState = initial_state or {
+            graph_input: PlanExecuteState = dict(initial_state) if initial_state else {
                 "input": user_input,
                 "plan": [],
                 "past_steps": [],
@@ -143,11 +129,38 @@ class AIOpsService:
                 "loop_guard": {},
             }
             graph_input["input"] = graph_input.get("input") or user_input
+            context = get_run_context()
+            payload = evidence_payload or {}
+            if context:
+                run = await asyncio.to_thread(context.repository.get_run, context.run_id)
+                payload = run["input"]
+            alert = payload.get("alert") or {}
+            diagnosis_context = graph_input.get("diagnosis_context") or {
+                "run_id": context.run_id if context else execution_id or session_id,
+                "host_id": payload.get("host") or alert.get("host", ""),
+                "event_time": alert.get("ts"),
+                "evaluation_mode": bool(payload.get("evaluation_mode", False)),
+            }
+            graph_input["diagnosis_context"] = diagnosis_context
+            graph_input["evidence_registry"] = register(graph_input.get("evidence_registry", {}),
+                                                        list(seed_evidence(payload, diagnosis_context).values()))
+            graph_input.setdefault("deadline_at", (datetime.now(UTC) + timedelta(
+                seconds=harness_settings.run_timeout_seconds)).isoformat())
+            if context:
+                await asyncio.to_thread(context.repository.merge_checkpoint, context.run_id,
+                                        "evidence_initialized", {
+                                            "diagnosis_context": diagnosis_context,
+                                            "evidence_registry": graph_input["evidence_registry"],
+                                            "deadline_at": graph_input["deadline_at"],
+                                        })
+
 
             # 流式执行工作流
             config_dict = {
                 "configurable": {"thread_id": execution_id or session_id},
-                "recursion_limit": max(1, harness_settings.graph_recursion_limit),
+                "recursion_limit": max(harness_settings.graph_recursion_limit,
+                                       3 * harness_settings.max_steps +
+                                       2 * (1 + harness_settings.verification_max_corrections) + 4),
             }
 
             async for event in self.graph.astream(
@@ -177,6 +190,13 @@ class AIOpsService:
                     elif node_name == NODE_MICROCOMPACT:
                         pass  # microcompact 内部已打印 TokenMeter，此处静默
 
+                    elif node_name == "verifier":
+                        yield {"type": "verification", "stage": "evidence_verification",
+                               "verification": node_output.get("verification", {}),
+                               "attempt": node_output.get("verification_attempts", 0)}
+                    elif node_name == "final_report":
+                        yield {"type": "report", "stage": "final_report",
+                               "message": "验证流程结束，诊断报告已生成", "report": node_output.get("response", "")}
                     elif node_name == NODE_REPLANNER:
                         # Level 4 Autocompact：检查累计 past_steps token 数
                         if node_output:
@@ -373,6 +393,7 @@ class AIOpsService:
         *,
         initial_state: PlanExecuteState | None = None,
         execution_id: str | None = None,
+        evaluation_mode: bool = False,
     ) -> str:
         """
         根据真实告警 payload 构造明确 prompt，运行 Plan-Execute-Replan 诊断，
@@ -389,6 +410,7 @@ class AIOpsService:
             session_id,
             initial_state=initial_state,
             execution_id=execution_id,
+            evidence_payload={"alert": alert.model_dump(mode="json"), "evaluation_mode": evaluation_mode},
         ):
             if event.get("type") == "complete":
                 report = event.get("response", "")
@@ -444,25 +466,9 @@ class AIOpsService:
         if not state:
             return {"type": "status", "stage": "replanner", "message": "评估节点运行中"}
 
-        response = state.get("response", "")
-        plan = state.get("plan", [])
-
-        if response:
-            # 已生成最终响应
-            return {
-                "type": "report",
-                "stage": "final_report",
-                "message": "最终报告已生成",
-                "report": response,
-            }
-        else:
-            # 重新规划
-            return {
-                "type": "status",
-                "stage": "replanner",
-                "message": f"评估完成，{'继续执行剩余步骤' if plan else '准备生成最终响应'}",
-                "remaining_steps": len(plan),
-            }
+        return {"type": "status", "stage": "replanner",
+                "message": "候选诊断待验证" if state.get("candidate_diagnosis") else "正在调整调查计划",
+                "remaining_steps": len(state.get("plan", []))}
 
 
 # 全局单例

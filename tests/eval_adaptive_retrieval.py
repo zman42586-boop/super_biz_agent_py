@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from statistics import mean
 
-from tests.eval_retrieval_v2 import _load_cases, _metrics
+from tests.eval_retrieval_v2 import _load_cases, _metrics, _name
 
 ROOT = Path(__file__).resolve().parents[1]
 NO_ANSWER_QUERIES = [
@@ -30,17 +30,21 @@ def run() -> dict:
 
     answer_rows = []
     for case in _load_cases():
+        print(f"[answerable] {case['id']}", flush=True)
         started = time.perf_counter()
         outcome = vector_store_manager.search_with_diagnostics(case["query"], k=5)
         latency = (time.perf_counter() - started) * 1000
         answer_rows.append(
             {
                 "id": case["id"],
+                "retrieved": [_name(doc) for doc in outcome.documents],
                 "confidence": outcome.confidence.score,
                 "level": outcome.confidence.level,
                 "attempts": outcome.attempts,
                 "rewritten": outcome.rewritten,
                 "reranker_used": outcome.reranker_used,
+                "reranker_succeeded": outcome.reranker_succeeded,
+                "error": outcome.error,
                 "latency_ms": latency,
                 **_metrics(case["relevant_docs"], outcome.documents, 5),
             }
@@ -48,6 +52,7 @@ def run() -> dict:
 
     no_answer_rows = []
     for index, query in enumerate(NO_ANSWER_QUERIES, 1):
+        print(f"[no-answer] {index}/{len(NO_ANSWER_QUERIES)}", flush=True)
         started = time.perf_counter()
         outcome = vector_store_manager.search_with_diagnostics(query, k=5)
         no_answer_rows.append(
@@ -58,8 +63,11 @@ def run() -> dict:
                 "attempts": outcome.attempts,
                 "rewritten": outcome.rewritten,
                 "reranker_used": outcome.reranker_used,
+                "reranker_succeeded": outcome.reranker_succeeded,
+                "error": outcome.error,
                 "latency_ms": (time.perf_counter() - started) * 1000,
-                "correct_abstention": outcome.confidence.level == "low",
+                "correct_abstention": outcome.confidence.level == "low" if not outcome.error else None,
+                "meaning": "retrieval_low_confidence_only_not_agent_abstention",
             }
         )
 
@@ -72,14 +80,18 @@ def run() -> dict:
         "mrr": mean(row["mrr"] for row in answer_rows),
         "ndcg_at_5": mean(row["ndcg_at_5"] for row in answer_rows),
         "hit_at_1": mean(row["hit_at_1"] for row in answer_rows),
-        "correct_abstention_rate": mean(row["correct_abstention"] for row in no_answer_rows),
+        "correct_abstention_rate": (mean(row["correct_abstention"] for row in no_answer_rows if row["correct_abstention"] is not None)
+                                    if any(row["correct_abstention"] is not None for row in no_answer_rows) else None),
+        "abstention_evaluable_count": sum(row["correct_abstention"] is not None for row in no_answer_rows),
+        "error_count": sum(bool(row["error"]) for row in answer_rows + no_answer_rows),
         "answerable_low_confidence_rate": mean(row["level"] == "low" for row in answer_rows),
         "retry_rate": mean(row["attempts"] == 2 for row in answer_rows + no_answer_rows),
         "reranker_rate": mean(row["reranker_used"] for row in answer_rows + no_answer_rows),
+        "reranker_success_rate": mean(row["reranker_succeeded"] for row in answer_rows + no_answer_rows),
         "latency_mean_ms": mean(latencies),
         "latency_p95_ms": latencies[math.ceil(len(latencies) * 0.95) - 1],
     }
-    return {"summary": summary, "answerable": answer_rows, "no_answer": no_answer_rows}
+    return {"label_policy": "legacy_positive_only_closed_world", "granularity": "document", "mrr_depth": 5, "summary": summary, "answerable": answer_rows, "no_answer": no_answer_rows}
 
 
 if __name__ == "__main__":

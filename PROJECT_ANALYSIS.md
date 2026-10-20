@@ -1,392 +1,93 @@
-# SuperBizAgent 项目分析报告
+# SuperBizAgent 当前架构
 
-> 版本：v1.2.1 | 分析日期：2026-05-07 | 作者：chief
+更新：2026-10-20；源码核查基线：28b4ce2。本文替换早期 v1.2.1 中已经过时的模型、Mock CLS、字符切分、空测试目录和 Redis 改造计划描述。
 
----
+## 项目定位
 
-## 一、项目整体业务含义
+面向 MATLAB 桌面进程的监控、证据收集和辅助诊断原型。进程消失、MATLAB 报错、进程崩溃和主机心跳失联分别处理，不能互相等同。没有实现自动修改 MATLAB/Simulink 或未经授权远程修复。
 
-**SuperBizAgent** 是一个**企业级智能 OnCall 运维助手系统**，核心目标是降低 OnCall 工程师的排查负担，通过 AI Agent 自动完成故障诊断。
+## 主链路
 
-### 业务场景
-
-- **自动诊断**：系统出现告警时，Agent 自动调用知识库、日志和监控工具，按 Plan-Execute-Replan 流程逐步排查，最终输出根因分析报告。
-
-### 技术选型动机
-
-| 选择 | 理由 |
-|------|------|
-| 阿里云 DashScope (Qwen-Max) | 国内可访问、OpenAI 兼容模式、中文能力强 |
-| Milvus 向量数据库 | 高性能、支持海量向量检索、本地 Docker 部署 |
-| LangGraph Plan-Execute | 官方推荐的 Agent 多步推理模式 |
-| MCP 协议 | 标准化的工具接入协议，Agent 可动态发现和调用外部工具 |
-| 纯静态前端 | 零构建、零依赖（仅 CDN 引入 marked + highlight.js） |
-
----
-
-## 二、核心功能模块拆解
-
-### 模块 1：AIOps 按需知识检索
-
-```
-Planner/Executor 判断需要知识证据 → retrieve_knowledge → 混合检索 → 返回诊断证据
-```
-
-**涉及文件：**
-
-| 文件 | 职责 |
-|------|------|
-| [app/tools/knowledge_tool.py](app/tools/knowledge_tool.py) | 知识检索工具（`retrieve_knowledge`） |
-| [app/services/vector_store_manager.py](app/services/vector_store_manager.py) | Milvus VectorStore 封装 |
-| [app/services/vector_search_service.py](app/services/vector_search_service.py) | 底层向量搜索 |
-| [app/services/vector_embedding_service.py](app/services/vector_embedding_service.py) | DashScope Text Embedding v4（1024维） |
-| [app/services/vector_index_service.py](app/services/vector_index_service.py) | 文档索引编排 |
-| [app/services/document_splitter_service.py](app/services/document_splitter_service.py) | 文档分块（Markdown 标题分割 + 递归字符分割 + 小片段合并） |
-| [app/tools/time_tool.py](app/tools/time_tool.py) | 当前时间工具 |
-
-**数据流：**
-
-1. 用户上传 `.md`/`.txt` → 按标题+字符分块（chunk_size=800, overlap=100）
-2. DashScope Embedding API 向量化 → 存入 Milvus `biz` collection
-3. Agent 在诊断步骤中按需调用 `retrieve_knowledge`，检索 Top-K 证据
-4. 检索证据进入 `past_steps`，由 Replanner 决定继续、改计划或生成报告
-
-### 模块 2：AIOps 智能运维（Plan-Execute-Replan）
-
-```
-Planner(制定计划) → Executor(执行步骤+调用MCP工具) → Replanner(评估/调整/生成报告)
-       ↑                                                            |
-       └──────────────── 循环直至信息充足 ───────────────────────────┘
+```mermaid
+flowchart TD
+    C[本机采集器: 进程/系统指标/可选温度] --> HB[轻量心跳]
+    C --> LOG[MATLAB 关键日志增量上传]
+    C --> EXIT[进程消失: 新 Dump 摘要/栈/退出后快照]
+    HB --> DB[MySQL 主机状态与有界历史]
+    LOG --> DB
+    EXIT --> API[FastAPI 告警入口]
+    DB --> DOWN[心跳超时: 失联事件]
+    API --> RUN[MySQL pending Run]
+    DOWN --> RUN
+    RUN --> W[Harness Worker: 认领/续租/Fencing/恢复]
+    W --> P[Planner]
+    P --> E[Executor + ToolGateway]
+    E --> M[Microcompact]
+    M --> R[Replanner]
+    R -->|仍需调查| E
+    R --> V[Evidence Verifier]
+    V -->|有限修正| R
+    V --> F[验证报告或原因未确定]
+    E --> RAG[Milvus Dense/BM25/RRF/自适应重排]
+    E --> TOOLS[历史工具/本地工具/Monitor MCP]
+    F --> RESULT[Run 报告与通知 Outbox]
+    F --> MEMORY[Incident 留档与知识价值审核]
 ```
 
-**涉及文件：**
+失联时实时 MCP/search_log 禁用，使用冻结历史和 RAG。普通进程告警也冻结已留存的本机历史，避免只能看到退出后的瞬时指标。
 
-| 文件 | 职责 |
-|------|------|
-| [app/services/aiops_service.py](app/services/aiops_service.py) | Plan-Execute-Replan 工作流编排 |
-| [app/agent/aiops/planner.py](app/agent/aiops/planner.py) | 计划制定器（先检索知识库获取经验，再参考可用工具制定步骤） |
-| [app/agent/aiops/executor.py](app/agent/aiops/executor.py) | 步骤执行器（LLM 绑定工具 → 决策调用 → ToolNode 执行 → LLM 总结） |
-| [app/agent/aiops/replanner.py](app/agent/aiops/replanner.py) | 重规划器（三种决策：respond / continue / replan） |
-| [app/agent/aiops/state.py](app/agent/aiops/state.py) | LangGraph 状态定义 |
-| [app/agent/aiops/utils.py](app/agent/aiops/utils.py) | 工具描述格式化 |
+## 模块职责
 
-**Replanner 决策逻辑：**
+| 模块 | 主要文件 | 行为 |
+|---|---|---|
+| API | app/api/alerts.py、runs.py、memory.py、file.py | 告警/心跳/日志接收、Run/SSE、人工质量反馈、记忆审核、知识索引 |
+| 编排 | app/services/aiops_service.py | 按持久化 phase 路由，候选不提前作为最终报告发布 |
+| 诊断 | app/agent/aiops/ | Planner、Executor、Microcompact、Replanner、Evidence、Verifier、Final Report |
+| 可靠执行 | app/harness/ | MySQL Run/Step/ToolCall/Event、租约、版本 Fencing、幂等缓存、预算、恢复、通知 |
+| 检索 | app/services/vector_*、retrieval_* | Dense/Sparse、RRF、置信度、有限改写、CrossEncoder、Parent 展开 |
+| 文档处理 | document_preprocessing.py、document_splitter_service.py、document_identity.py | 同款预处理、H1/H2 Parent、420/64 token Child、来源与内容版本 ID |
+| 离线评测 | app/evaluation/、tests/eval_* | 候选池、人工 qrels、冻结版本、未知标签处理、旧集合回归及独立 Judge |
+| 本机采集 | scripts/lhm_alert_agent.py、app/harness/log_collector.py | psutil、可选 LHM、进程退出、Dump 摘要、日志游标与重试队列 |
+| MCP | mcp_servers/monitor_server.py | 本服务主机的当前 CPU/内存/LHM；不提供伪历史时序 |
 
-- **优先 respond** — 信息足够就结束，不追求完美
-- **其次 continue** — 当前计划合理，继续执行
-- **最后 replan** — 严格限制：已执行≥5步禁止 replan，新步骤数不能超过剩余步骤数
-- **硬限制**：最多执行 8 步，超过强制生成报告
+## 模型与检索
 
-**决策口诀**："优先结束 > 保持不变 > 调整计划"
+默认诊断/在线 Verifier 为 deepseek-v4-flash，离线 Judge 为 deepseek-v4-pro，均由现有 llm_factory 创建。Verifier 采用独立 Prompt，仍然复用同一模型，不能消除相关性偏差。
 
-### 模块 3：MCP 工具服务
+Embedding 为 BAAI/bge-small-zh-v1.5（512维归一化向量），CrossEncoder 为 BAAI/bge-reranker-base。Milvus 2.5 使用 Dense FLAT/IP、内置中文 BM25 稀疏索引，分别召回后应用层 RRF 保留两路名次。Child 双路 Top10 命中与唯一 Parent 覆盖用于路由；它不是诊断正确概率。
 
-#### CLS Server（[mcp_servers/cls_server.py](mcp_servers/cls_server.py)）— 端口 8003
+最终输出按 Parent 章节去重，同一文件可出现多个 Parent。旧文件级评测必须另行去重，不能把 Parent 数量当成相关文件数。重排失败保留 RRF 候选，但显式记录 error、reranker_succeeded=false，并降低检索置信度。
 
-| 工具 | 说明 |
-|------|------|
-| `get_current_timestamp` | 获取毫秒时间戳 |
-| `get_region_code_by_name` | 地区码查询 |
-| `get_topic_info_by_name` | 日志主题查询 |
-| `search_topic_by_service_name` | 按服务名搜索日志主题（支持模糊匹配） |
-| `search_log` | 日志搜索（按时间范围+查询语句） |
+新内容 ID 在文档重新索引时生效，不自动改写既有 biz collection；live_pool 可对旧集合只读映射版本化 ID。线下候选池与线上检索主链路分开。
 
-#### Monitor Server（[mcp_servers/monitor_server.py](mcp_servers/monitor_server.py)）— 端口 8004
+## 证据与报告
 
-| 工具 | 说明 |
-|------|------|
-| `query_cpu_metrics` | CPU 使用率时序数据（动态生成趋势数据） |
-| `query_memory_metrics` | 内存使用率时序数据 |
+Evidence 记录原文、哈希、来源/位置、Run/host/时间及知识文档版本；模型推断和 query 不是事实。候选结论引用 Evidence ID、逐字原文和快照局部行号。验证先做 Python 确定性检查，再独立调用诊断模型做语义校验。
 
-> 当前为 Mock 数据，可替换为真实腾讯云 CLS SDK / Prometheus 等
+只有 Final Report 节点写最终 response。SUPPORTED 且 root_cause 非空才表示本次候选根因通过验证；弃权也可安全结束。失败在剩余 Step/Tool/验证预算内回 Replanner，最多两次修正；预算耗尽或相同结论同证据重复时输出事实、原因未确定和待补证据。
 
-### 模块 4：文件上传与知识库管理
+## 持久化与恢复
 
-**涉及文件：** [app/api/file.py](app/api/file.py) + [app/services/vector_index_service.py](app/services/vector_index_service.py)
+MySQL 是业务执行状态真源；LangGraph MemorySaver 只保存进程内图状态。每个节点更新合并到 state_json，phase 指向下一节点。恢复不清空 past_steps、证据、工具记录、LoopGuard、验证次数或截止时间。
 
-- 上传 `.txt`/`.md`，最大 10MB
-- 自动分块 → 向量化 → 存入 Milvus
-- 支持覆盖更新（同文件重新上传会先删除旧数据）
-- 已内建 `aiops-docs/` 目录下的 5 个运维知识文档：
+version 是每次认领递增的 Fencing Token，续租及普通写入不递增。关键写入校验 run/worker/version/租约，旧 Worker 不能覆盖接管后的结果。总 deadline 在第一认领时形成并保留。Step 成功但图快照未保存的间隙，可复用 Step/ToolCall 的结果和 evidence。
 
-| 文档 | 大小 | 内容 |
-|------|------|------|
-| `cpu_high_usage.md` | 3.6 KB | CPU 使用率过高排查方案 |
-| `disk_high_usage.md` | 7.7 KB | 磁盘使用率过高排查方案 |
-| `memory_high_usage.md` | 5.4 KB | 内存使用率过高排查方案 |
-| `service_unavailable.md` | 7.5 KB | 服务不可用排查方案 |
-| `slow_response.md` | 6.6 KB | 服务响应慢排查方案 |
+默认 8 Step、20 次逻辑工具调用、两次无进展、300秒总期限、工具有限重试、最多3次验证。有效图递归上限至少34。SMTP 通过事务通知 Outbox 发送，异常可能是 uncertain，不能承诺 exactly-once。
 
-### 模块 5：Run 状态与恢复
+## 数据边界
 
-- LangGraph `MemorySaver` 保存进程内图状态
-- Harness 将 Run、Step、ToolCall、Event 和恢复快照写入数据库
-- `plan`、`past_steps` 和工具证据支持诊断续作
+MySQL 保存默认两小时、有容量上限的指标和 MATLAB 关键日志，不是全量日志平台。Dump 原文件仍在本机，服务端主要保存摘要、栈和可追溯元数据。search_log 是 FastAPI 本地日志；Monitor MCP 的 service_name 不选择目标主机。心跳失联只能证明服务端未收到心跳。
 
----
+## 测试与评测
 
-## 三、系统架构设计
+本轮完整回归 158 passed、2 skipped；随后在一次独立临时 MySQL 库中运行这两项得到2 passed，并清理临时库和用户。真实 Milvus 检索、40+10 自适应评测、固定链路对照，以及2个合成场景的真实模型/Judge 冒烟均已执行。没有运行 MATLAB 注入或真实事故准确率验收。
 
-### 整体架构图
+当前部署集合228个Chunk；人工候选池50条查询、1266候选全部未标注。不得用旧 relevant_docs 或模型分数伪装成人工真值。具体指标、命令、样本边界与限制见 [本轮验收报告](docs/aiops-improvement-20261020.md)。
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Frontend (Static)                           │
-│                    index.html + app.js + styles.css                 │
-│                  SSE EventSource / Fetch API / FormData             │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │ HTTP (port 9900)
-┌──────────────────────────────▼──────────────────────────────────────┐
-│                      FastAPI Application                            │
-│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────────┐   │
-│  │ /api/runs │  │ /api/     │  │ /api/     │  │ /api/health   │   │
-│  │ /api/runs │  │ aiops     │  │ upload    │  │               │   │
-│  │ events    │  │ (SSE)     │  │           │  │               │   │
-│  │           │  │           │  │           │  │               │   │
-│  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └───────┬───────┘   │
-│        │              │              │                │             │
-│  ┌─────▼──────┐ ┌─────▼──────────┐ ┌─▼────────────┐  │             │
-│  │ Harness    │ │ AIOps Service  │ │ Vector Index │  │             │
-│  │ Worker/API │ │ (Plan-Exec-    │ │ Service      │  │             │
-│  │ Run/Step/  │ │  Replan)       │ │              │  │             │
-│  │ ToolCall   │ │                │ │              │  │             │
-│  └──┬───┬─────┘ └───┬────┬───────┘ └──┬───┬───────┘  │             │
-│     │   │           │    │             │   │          │             │
-│     │   │    ┌──────┘    │             │   │          │             │
-│     │   │    │     ┌─────┘             │   │          │             │
-│     │   │    │     │                   │   │          │             │
-│  ┌──▼───▼────▼─────▼──────┐    ┌───────▼───▼──────┐   │             │
-│  │   MCP Client           │    │  Milvus Manager  │   │             │
-│  │   (MultiServerMCP)     │    │  (pymilvus)      │   │             │
-│  │   + Retry Interceptor  │    │  collection: biz │   │             │
-│  └──────────┬─────────────┘    └───────┬──────────┘   │             │
-│             │                          │               │             │
-└─────────────┼──────────────────────────┼───────────────┼─────────────┘
-              │                          │               │
-    ┌─────────▼──────────┐    ┌──────────▼──────────┐   │
-    │ CLS MCP Server     │    │ Monitor MCP Server  │   │
-    │ (port 8003)        │    │ (port 8004)         │   │
-    │ FastMCP + Mock     │    │ FastMCP + Mock      │   │
-    └────────────────────┘    └─────────────────────┘   │
-                                                  ┌─────▼──────────────┐
-                                                  │ Milvus Standalone  │
-                                                  │ (port 19530)       │
-                                                  │ + Etcd + MinIO     │
-                                                  │ + Attu Web UI      │
-                                                  │   (port 8000)      │
-                                                  └────────────────────┘
-                                            ┌──────────────────────────┐
-                                            │  Alibaba Cloud DashScope │
-                                            │  Qwen-Max (LLM)         │
-                                            │  text-embedding-v4 (Emb)│
-                                            └──────────────────────────┘
-```
+## 进一步说明
 
-### 分层架构（代码层面）
-
-| 层 | 目录 | 职责 |
-|---|------|------|
-| **路由层** | `app/api/` | HTTP 请求处理、SSE 流式适配、输入验证 |
-| **服务层** | `app/services/` | 业务逻辑编排（AIOps 工作流、检索与向量索引） |
-| **Agent 层** | `app/agent/` | LangGraph 节点实现（Planner/Executor/Replanner）、MCP 客户端管理 |
-| **工具层** | `app/tools/` | LangChain Tool 定义（知识检索、时间查询） |
-| **数据模型层** | `app/models/` | Pydantic 请求/响应模型 |
-| **核心层** | `app/core/` | LLM 工厂、Milvus 客户端管理（连接/建表/索引） |
-| **工具层** | `app/utils/` | 日志配置（Loguru） |
-| **MCP 服务** | `mcp_servers/` | 独立的 MCP Server 进程（CLS、Monitor） |
-| **前端** | `static/` | 纯静态 HTML/CSS/JS |
-| **知识库** | `aiops-docs/` | 运维知识文档（RAG 数据源） |
-
-### API 接口一览
-
-| 功能 | 方法 | 路径 | 说明 |
-|------|------|------|------|
-| AIOps 诊断 | POST | `/api/aiops` | 自动故障诊断（SSE 流式） |
-| 文件上传 | POST | `/api/upload` | 上传并索引文档 |
-| 索引目录 | POST | `/api/index_directory` | 批量索引指定目录 |
-| 健康检查 | GET | `/api/health` | 服务状态检查 |
-
-### SSE 事件类型（AIOps 诊断流）
-
-| 事件类型 | 阶段 | 说明 |
-|---------|------|------|
-| `plan` | plan_created | 诊断计划制定完成 |
-| `step_complete` | step_executed | 单个步骤执行完成 |
-| `report` | final_report | 最终诊断报告生成 |
-| `complete` | diagnosis_complete | 诊断流程完成 |
-| `error` | - | 异常信息 |
-
-### 关键设计决策
-
-1. **全局单例模式** — 核心 Service、Manager 使用模块级单例（`aiops_service`、`milvus_manager`、`vector_store_manager` 等）
-2. **延迟初始化** — Agent 中的 MCP 工具在首次查询时异步加载，避免启动时阻塞
-3. **会话隔离** — 通过 LangGraph `thread_id` 机制实现多会话隔离
-4. **流式输出** — AIOps 诊断接口使用 SSE（Server-Sent Events），非 WebSocket
-5. **重试机制** — MCP 工具调用内置指数退避重试（最多 3 次，1s/2s/4s）
-6. **内存存储** — 会话检查点使用 MemorySaver（进程重启丢失），适合单机部署
-
----
-
-## 四、按前后端拆分的开发任务
-
-### 后端任务
-
-#### 第一梯队：基础设施补全
-
-| 任务 | 说明 | 优先级 |
-|------|------|--------|
-| 添加 Redis 会话存储 | 替换 MemorySaver，支持服务重启后会话不丢失 | P0 |
-| 配置管理增强 | 支持多环境配置（dev/staging/prod），敏感信息加解密 | P0 |
-| 单元测试搭建 | 测试目录 `tests/` 已配置但为空，需补充核心模块测试 | P0 |
-| Docker 化主服务 | 编写 Dockerfile，将 FastAPI + MCP 服务容器化 | P1 |
-
-#### 第二梯队：功能增强
-
-| 任务 | 说明 | 优先级 |
-|------|------|--------|
-| MCP Server 接入真实 API | CLS Server 对接腾讯云 CLS SDK，Monitor 对接 Prometheus/Grafana | P0 |
-| 增加更多监控指标工具 | 磁盘 I/O、网络流量、进程列表、JVM 指标等 | P1 |
-| 告警源对接 | 对接 Prometheus AlertManager / 腾讯云监控告警，实现事件驱动诊断 | P1 |
-| 诊断报告持久化 | 将诊断结果存入数据库，支持历史查询和趋势分析 | P1 |
-| 多模型支持 | LLM Factory 已预留 OpenAI 兼容接口，支持切换到其他模型 | P2 |
-| RAG 检索增强 | 混合检索（向量 + BM25）、重排序（Reranker）、Query 改写 | P2 |
-| 并发控制 | 添加请求队列/限流，防止 LLM API 过载 | P2 |
-
-#### 第三梯队：运维与质量
-
-| 任务 | 说明 | 优先级 |
-|------|------|--------|
-| 可观测性 | 添加 Prometheus metrics、请求追踪（trace_id） | P1 |
-| CI/CD | GitHub Actions / Jenkins pipeline | P1 |
-| API 版本化 | `/api/v1/aiops` 等版本化路由 | P2 |
-| 数据库迁移工具 | Alembic 管理 Milvus schema 变更 | P2 |
-
-### 前端任务
-
-#### 第一梯队：基础体验
-
-| 任务 | 说明 | 优先级 |
-|------|------|--------|
-| 错误处理优化 | 统一错误码映射、网络断开重连提示、超时处理 | P0 |
-| AIOps 诊断进度可视化 | 实时显示当前执行步骤、工具调用状态（类似 CI/CD Pipeline） | P0 |
-| 移动端适配 | 响应式布局，支持手机浏览器 | P1 |
-
-#### 第二梯队：功能增强
-
-| 任务 | 说明 | 优先级 |
-|------|------|--------|
-| Markdown 渲染优化 | 支持表格、Mermaid 图表、任务列表等扩展语法 | P1 |
-| 知识库管理界面 | 查看已索引文档列表、手动删除/重新索引 | P1 |
-| 暗色模式 | 主题切换 | P2 |
-| 多语言 | 中英文切换 | P2 |
-
-#### 第三梯队：架构演进
-
-| 任务 | 说明 | 优先级 |
-|------|------|--------|
-| 前端框架迁移 | 考虑迁移到 React/Vue（当前纯 JS 1550+ 行，可维护性下降） | P2 |
-| TypeScript 化 | 类型安全 | P2 |
-| WebSocket 替代 SSE | 支持双向通信、更精确的状态同步 | P2 |
-
----
-
-## 五、技术栈一览
-
-| 类别 | 技术 | 版本 |
-|------|------|------|
-| **语言** | Python | >=3.11, <3.14 |
-| **Web 框架** | FastAPI | >=0.109.0 |
-| **LLM 框架** | LangChain + LangGraph | >=0.1.0 / >=0.0.40 |
-| **LLM 适配** | langchain-qwq (ChatQwen) | >=0.3.4 |
-| **LLM 提供商** | 阿里云 DashScope (Qwen-Max) | - |
-| **向量数据库** | Milvus (pymilvus + langchain-milvus) | v2.5.10 |
-| **MCP 框架** | FastMCP + langchain-mcp-adapters | >=2.14.0 / >=0.2.1 |
-| **流式输出** | sse-starlette | >=2.1.0 |
-| **日志** | Loguru | >=0.7.2 |
-| **数据校验** | Pydantic + pydantic-settings | >=2.5.0 |
-| **包管理** | uv | - |
-| **前端** | 原生 HTML/CSS/JS + marked.js + highlight.js | - |
-| **容器** | Docker Compose (Milvus + Etcd + MinIO + Attu) | - |
-
----
-
-## 六、部署架构
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                       宿主机 (localhost)                     │
-│                                                             │
-│  ┌─────────────┐  ┌─────────────┐  ┌──────────────────┐   │
-│  │ FastAPI      │  │ CLS MCP     │  │ Monitor MCP      │   │
-│  │ :9900        │  │ Server :8003│  │ Server :8004     │   │
-│  └─────────────┘  └─────────────┘  └──────────────────┘   │
-│                                                             │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │ Docker Compose (milvus network)                      │  │
-│  │                                                      │  │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │  │
-│  │  │ etcd     │  │ MinIO    │  │ milvus-standalone│  │  │
-│  │  │ :2379    │  │ :9000/01 │  │ :19530           │  │  │
-│  │  └──────────┘  └──────────┘  └──────────────────┘  │  │
-│  │                                                      │  │
-│  │  ┌──────────┐                                        │  │
-│  │  │ Attu     │  (Milvus Web UI)                       │  │
-│  │  │ :8000    │                                        │  │
-│  │  └──────────┘                                        │  │
-│  └──────────────────────────────────────────────────────┘  │
-│                                                             │
-│  外部依赖: Alibaba Cloud DashScope API                       │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 服务端口汇总
-
-| 服务 | 端口 | 说明 |
-|------|------|------|
-| FastAPI 主服务 | 9900 | API 接口 + Web 前端 |
-| CLS MCP Server | 8003 | 日志查询工具服务 |
-| Monitor MCP Server | 8004 | 监控数据工具服务 |
-| Milvus | 19530 | 向量数据库 |
-| Milvus Health | 9091 | Milvus 健康检查 |
-| Attu | 8000 | Milvus Web 管理界面 |
-| MinIO | 9000 | S3 兼容对象存储（Milvus 数据存储） |
-| MinIO Console | 9001 | MinIO Web 管理界面 |
-
----
-
-## 七、启动流程
-
-```
-make init
-  ├── 步骤1: docker compose up -d (Milvus + Etcd + MinIO + Attu)
-  ├── 步骤2: 启动 CLS MCP Server (port 8003)
-  ├── 步骤3: 启动 Monitor MCP Server (port 8004)
-  ├── 步骤4: 启动 FastAPI (port 9900)
-  ├── 步骤5: 等待服务就绪 (健康检查)
-  └── 步骤6: 上传 aiops-docs/*.md 到向量库
-```
-
-Windows 用户使用 `start-windows.bat` 一键启动。
-
----
-
-## 八、项目文件统计
-
-| 目录 | 文件数 | 核心职责 |
-|------|--------|---------|
-| `app/api/` | 4 | HTTP 路由处理 |
-| `app/services/` | 6 | 业务逻辑服务 |
-| `app/agent/` | 5 | AI Agent 核心逻辑 |
-| `app/agent/aiops/` | 4 | Plan-Execute-Replan 节点 |
-| `app/tools/` | 2 | LangChain 工具定义 |
-| `app/models/` | 4 | Pydantic 数据模型 |
-| `app/core/` | 2 | LLM 工厂 + Milvus 客户端 |
-| `app/utils/` | 1 | 日志配置 |
-| `mcp_servers/` | 2 | MCP 工具服务器 |
-| `static/` | 3 | Web 前端 |
-| `aiops-docs/` | 5 | 运维知识库文档 |
-| **总计** | **~42** | |
-
----
-
-*本文档基于项目 v1.2.1 全部源代码分析生成，涵盖 42 个文件、约 5000+ 行代码。*
+- [验证器与恢复协议](docs/evidence-verification.md)
+- [检索评测及标注方法](docs/retrieval-evaluation.md)
+- [MCP 与数据链路核查](docs/mcp-evidence-audit.md)
+- [持久化 OnCall 与迁移](docs/durable-oncall.md)
+- [安全故障样本](tests/fault_injection/README.md)

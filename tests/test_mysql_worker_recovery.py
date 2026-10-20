@@ -105,3 +105,53 @@ async def test_mysql_hard_kill_live_workers_and_fencing():
             session.execute(delete(RunEvent).where(RunEvent.run_id == run["id"]))
             session.execute(delete(AgentRun).where(AgentRun.id == run["id"]))
         repository.close()
+
+
+@pytest.mark.asyncio
+async def test_mysql_verifier_counter_phase_and_deadline_survive_takeover(monkeypatch):
+    """Real MySQL checkpoint writes plus the production verifier reservation."""
+    url = os.getenv("HARNESS_TEST_MYSQL_URL")
+    if not url:
+        pytest.skip("HARNESS_TEST_MYSQL_URL absent; requires disposable MySQL 8 database")
+    from datetime import timedelta
+    import importlib
+    from unittest.mock import AsyncMock
+    from app.harness.runtime import HarnessRunContext, harness_run_context
+    from app.agent.aiops.verifier import evidence_verifier
+    from tests.test_evidence_verifier import state, supported
+
+    repository = HarnessRepository(url)
+    run = repository.create_run(task="verifier recovery", session_id="mysql-verifier")
+    repository.claim_next_run("verifier-a", 30)
+    current = state()
+    current["verification_attempts"] = 2
+    current["loop_guard"] = {"reason": "no_progress", "trigger_count": 2}
+    current["diagnosis_context"] = {**current["diagnosis_context"], "run_id": run["id"]}
+    for evidence in current["evidence_registry"].values():
+        evidence["run_id"] = run["id"]
+    try:
+        repository.merge_checkpoint(run["id"], "candidate", current, worker_id="verifier-a", version=1)
+        _, first = repository.reserve_run_deadline(run["id"], 300, worker_id="verifier-a", version=1)
+        with repository._session_factory.begin() as session:
+            session.get(AgentRun, run["id"]).lease_expires_at = repository.db_now(session) - timedelta(seconds=1)
+        repository.recover_stale_runs()
+        resumed = repository.claim_next_run("verifier-b", 30)
+        assert resumed["state"]["phase"] == "verifier" and resumed["state"]["verification_attempts"] == 2
+        _, second = repository.reserve_run_deadline(run["id"], 999, worker_id="verifier-b", version=2)
+        assert first["deadline_at"] == second["deadline_at"]
+        module = importlib.import_module("app.agent.aiops.verifier")
+        monkeypatch.setattr(module, "semantic_check", AsyncMock(return_value=supported()))
+        with harness_run_context(HarnessRunContext(run["id"], repository, "verifier-b", 2)):
+            update = await evidence_verifier(resumed["state"])
+            repository.merge_checkpoint(run["id"], "verifier", update)
+        saved = repository.get_run(run["id"])["state"]
+        assert saved["verification_attempts"] == 3 and saved["candidate_verified"] is True
+        assert saved["loop_guard"] == current["loop_guard"]
+        assert saved["evidence_registry"] == current["evidence_registry"]
+        with pytest.raises(LeaseLostError):
+            repository.merge_checkpoint(run["id"], "stale", {"verification_attempts": 0}, worker_id="verifier-a", version=1)
+    finally:
+        with repository._session_factory.begin() as session:
+            session.execute(delete(RunEvent).where(RunEvent.run_id == run["id"]))
+            session.execute(delete(AgentRun).where(AgentRun.id == run["id"]))
+        repository.close()

@@ -20,18 +20,39 @@
         "cpu_percent": 25.0,
         "memory_percent": 45.0,
         "top_processes": [
-          {"name": "chrome.exe", "cpu": 10.0, "memory": 8.0}
+          {
+            "name": "chrome.exe",
+            "cpu": 10.0,
+            "memory": 8.0
+          }
         ]
       }
     }
   },
   "expected": {
-    "must_mention": ["无法确定", "未知"],
-    "should_mention": ["手动关闭", "系统日志", "建议启用详细日志"],
-    "must_not_mention": ["栈溢出", "OCSC", "MEX 崩溃"]
+    "must_mention": [
+      "无法确定",
+      "未知"
+    ],
+    "should_mention": [
+      "手动关闭",
+      "系统日志",
+      "建议启用详细日志"
+    ],
+    "must_not_mention": [
+      "栈溢出",
+      "OCSC",
+      "MEX 崩溃"
+    ]
   },
   "max_score": 10,
   "relevant_docs": [
     "matlab_error_codes_reference"
-  ]
+  ],
+  "data_provenance": {
+    "kind": "synthetic_fixture",
+    "real_injection_observed": false,
+    "human_relevance_review": "not_recorded",
+    "version": "evidence-boundary-v1"
+  }
 }

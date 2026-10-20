@@ -35,6 +35,10 @@ class HarnessSettings:
     min_dynamic_call_interval_seconds: float = 5.0
     max_no_progress_steps: int = 2
     graph_recursion_limit: int = 32
+    verification_max_corrections: int = 2
+    verification_timeout_seconds: float = 30.0
+    evidence_history_seconds: float = 7200.0
+    evidence_future_seconds: float = 60.0
 
     @classmethod
     def from_env(cls) -> HarnessSettings:
@@ -70,6 +74,10 @@ class HarnessSettings:
             ),
             max_no_progress_steps=int(os.getenv("HARNESS_MAX_NO_PROGRESS_STEPS", "2")),
             graph_recursion_limit=int(os.getenv("HARNESS_GRAPH_RECURSION_LIMIT", "32")),
+            verification_max_corrections=max(0, int(os.getenv("HARNESS_VERIFICATION_MAX_CORRECTIONS", "2"))),
+            verification_timeout_seconds=max(0.01, float(os.getenv("HARNESS_VERIFICATION_TIMEOUT_SEC", "30"))),
+            evidence_history_seconds=max(0, float(os.getenv("HARNESS_EVIDENCE_HISTORY_SEC", "7200"))),
+            evidence_future_seconds=max(0, float(os.getenv("HARNESS_EVIDENCE_FUTURE_SEC", "60"))),
         )
 
 

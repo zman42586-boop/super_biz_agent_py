@@ -24,13 +24,15 @@ from app.tools.host_history import available_tools, offline_notice
 from app.utils.token_meter import log_token_budget
 
 from .state import PlanExecuteState
+from .evidence import register, tool_evidence
+from app.harness.tool_gateway import ToolGateway, _result_text
 
 
 class Plan(BaseModel):
     """计划的输出格式"""
 
     steps: list[str] = Field(
-        description="完成任务所需的不同步骤。这些步骤应该按顺序执行，每一步都建立在前一步的基础上。"
+        description="必须返回字符串数组，例如 ['检索错误码', '分析已登记日志']，不能返回一段步骤文本。步骤按顺序执行。"
     )
 
 
@@ -93,12 +95,14 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
     await ensure_run_ownership()
     logger.info("=== Planner：制定执行计划 ===")
 
+    registry = dict(state.get("evidence_registry", {}))
+    prefetch_calls = int(state.get("prefetch_tool_calls", 0))
     input_text = state.get("input", "")
     logger.info(f"用户输入: {input_text}")
 
     try:
         # 步骤0: 读取 Hot 记忆（仅 MEMORY.md：摘要 + 报告链接）
-        memory_ctx = load_memory_context()
+        memory_ctx = "" if state.get("diagnosis_context", {}).get("evaluation_mode") else load_memory_context()
         if memory_ctx:
             memory_context = dedent(f"""
                 ## 长期记忆参考
@@ -119,7 +123,25 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
         try:
             # retrieve_knowledge 使用 response_format="content_and_artifact"
             # ainvoke() 只返回 content（字符串），不是元组
-            context_str = await retrieve_knowledge.ainvoke({"query": input_text, "mode": "plan"})
+            context_str = ""
+            if prefetch_calls == 0 and harness_settings.max_tool_calls > 0:
+                prefetch_calls = 1
+                context = get_run_context()
+                if context:
+                    await asyncio.to_thread(context.repository.merge_checkpoint, context.run_id,
+                                            "planner_prefetch_reserved",
+                                            {"prefetch_tool_calls": 1, "phase": "planner"})
+                arguments = {"query": input_text, "mode": "plan"}
+                if state.get("diagnosis_context", {}).get("evaluation_mode"):
+                    arguments["source_types"] = ["official", "case", "knowledge"]
+                raw = await asyncio.wait_for(ToolGateway._invoke(retrieve_knowledge, arguments),
+                                            timeout=harness_settings.tool_timeout_seconds)
+                context_str = _result_text(raw)
+                registry = register(registry, tool_evidence("retrieve_knowledge", raw,
+                                     state.get("diagnosis_context", {})))
+                if context:
+                    await asyncio.to_thread(context.repository.merge_checkpoint, context.run_id,
+                                            "planner_evidence", {"evidence_registry": registry})
             context = get_run_context()
             if context and context.offline_host:
                 await asyncio.to_thread(
@@ -148,9 +170,12 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
 
         # 获取 MCP 工具（失败时降级为仅本地工具）
         try:
-            local_tools, mcp_tools = await available_tools(
-                local_tools, get_mcp_tools_with_circuit_breaker
-            )
+            if state.get("diagnosis_context", {}).get("evaluation_mode"):
+                local_tools, mcp_tools = [get_current_time, retrieve_knowledge], []
+            else:
+                local_tools, mcp_tools = await available_tools(
+                    local_tools, get_mcp_tools_with_circuit_breaker
+                )
         except LeaseLostError:
             raise
         except Exception as e:
@@ -232,11 +257,12 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
         for i, step in enumerate(plan_steps, 1):
             logger.info(f"  步骤{i}: {step}")
 
-        return {"plan": plan_steps}
+        return {"plan": plan_steps, "evidence_registry": registry, "prefetch_tool_calls": prefetch_calls}
 
     except LeaseLostError:
         raise
     except Exception as e:
         logger.error(f"生成计划失败: {e}", exc_info=True)
         # 返回一个默认计划
-        return {"plan": ["收集相关信息", "分析数据", "生成报告"]}
+        return {"plan": ["收集相关信息", "分析数据", "生成报告"][:harness_settings.max_steps],
+                "evidence_registry": registry, "prefetch_tool_calls": prefetch_calls}

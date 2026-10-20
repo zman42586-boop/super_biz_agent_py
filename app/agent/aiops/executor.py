@@ -23,6 +23,7 @@ from app.tools.host_history import available_tools, offline_notice
 from app.tools.result import make_tool_result
 
 from .state import PlanExecuteState
+from .evidence import register
 
 
 async def executor(state: PlanExecuteState) -> dict[str, Any]:
@@ -46,6 +47,10 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
     logger.info(f"当前任务: {task}")
 
     current_past_steps = list(state.get("past_steps", []))
+    registry = dict(state.get("evidence_registry", {}))
+    call_history = list(state.get("tool_calls", []))
+    collected_evidence = []
+    guard_state = dict(state.get("loop_guard", {}))
     run_context = get_run_context()
     guard_decision = loop_guard.evaluate_step(task, current_past_steps)
     if not guard_decision.allowed:
@@ -68,6 +73,9 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
             "past_steps": current_past_steps
             + [(task, f"LoopGuard 已停止该步骤：{guard_decision.message}")],
             "loop_guard": guard_state,
+            "phase": "microcompact",
+            "candidate_diagnosis": {},
+            "candidate_verified": False,
         }
 
     # Skill 识别：若步骤包含 .claude/skills 中声明的 id，记录日志
@@ -92,6 +100,10 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
             return {
                 "plan": plan[1:],
                 "past_steps": current_past_steps + [(task, stored_result)],
+                "evidence_registry": register(registry, stored.get("evidence", [])),
+                "phase": "microcompact",
+                "candidate_diagnosis": {},
+                "candidate_verified": False,
             }
 
     try:
@@ -104,9 +116,12 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
         # 获取 MCP 工具（失败时降级为仅本地工具）
         try:
-            local_tools, mcp_tools = await available_tools(
-                local_tools, get_mcp_tools_with_circuit_breaker
-            )
+            if state.get("diagnosis_context", {}).get("evaluation_mode"):
+                local_tools, mcp_tools = [get_current_time, retrieve_knowledge], []
+            else:
+                local_tools, mcp_tools = await available_tools(
+                    local_tools, get_mcp_tools_with_circuit_breaker
+                )
         except LeaseLostError:
             raise
         except Exception as e:
@@ -181,10 +196,18 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
                             arguments=arguments,
                             step_id=int(step_row["id"]) if step_row else None,
                             step_index=step_index,
+                            evidence_context=state.get("diagnosis_context", {}),
+                            call_history=call_history,
+                            budget_offset=int(state.get("prefetch_tool_calls", 0)),
                         )
                         content = execution.content
                         structured_content = execution.structured_content
+                        collected_evidence.extend(execution.evidence or [])
+                        registry = register(registry, execution.evidence or [])
                     except ToolExecutionError as tool_error:
+                        if tool_error.code.startswith("LOOP_GUARD_"):
+                            guard_state = {"reason": tool_error.code.removeprefix("LOOP_GUARD_").lower(),
+                                           "message": str(tool_error)}
                         structured_content = make_tool_result(
                             status="error",
                             summary=str(tool_error),
@@ -259,12 +282,19 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
                 run_context.repository.complete_step,
                 int(step_row["id"]),
                 output=result_for_state,
+                evidence=collected_evidence,
             )
 
         # past_steps 使用全量替换 reducer，必须返回完整列表
         return {
             "plan": plan[1:],
             "past_steps": current_past_steps + [(task, result_for_state)],
+            "evidence_registry": registry,
+            "tool_calls": call_history,
+            "loop_guard": guard_state,
+            "phase": "microcompact",
+            "candidate_diagnosis": {},
+            "candidate_verified": False,
         }
 
     except LeaseLostError:
@@ -281,4 +311,10 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
         return {
             "plan": plan[1:],
             "past_steps": current_past_steps + [(task, f"执行失败: {str(e)}")],
+            "evidence_registry": registry,
+            "tool_calls": call_history,
+            "loop_guard": guard_state,
+            "phase": "microcompact",
+            "candidate_diagnosis": {},
+            "candidate_verified": False,
         }

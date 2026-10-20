@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from app.evaluation.pooling import fingerprint
 
 
 def build_experiment_report(
     experiment_name: str,
     cases: list[dict[str, Any]],
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     judged = [row for row in cases if row.get("judge_score") is not None]
     retrieved = [row for row in cases if row.get("retrieval")]
@@ -17,7 +19,9 @@ def build_experiment_report(
         return round(sum(values) / len(values), 4) if values else None
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "dataset_hash": fingerprint([{key: row.get(key) for key in ("id", "input_hash", "judgments_hash")} for row in cases]),
+        "evaluation_metadata": metadata or {},
         "experiment_name": experiment_name,
         "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "scenario_count": len(cases),
@@ -66,6 +70,10 @@ def compare_experiments(
             "regressed_cases": [],
         }
 
+    for key in ("schema_version", "dataset_hash", "evaluation_metadata"):
+        if baseline.get(key) != candidate.get(key):
+            return {"passed": False, "reasons": [f"{key}_changed"], "deltas": {}, "regressed_cases": []}
+
     baseline_aggregate = baseline.get("aggregate", {})
     candidate_aggregate = candidate.get("aggregate", {})
 
@@ -81,6 +89,9 @@ def compare_experiments(
         for name in ("judge_average", "judge_pass_rate", "recall_at_k", "precision_at_k", "mrr")
     }
     reasons: list[str] = []
+    for metric in ("judge_average", "recall_at_k", "mrr"):
+        if baseline_aggregate.get(metric) is None or candidate_aggregate.get(metric) is None:
+            reasons.append(f"{metric}_unavailable")
     thresholds = {
         "judge_average": max_judge_drop,
         "recall_at_k": max_recall_drop,
@@ -97,7 +108,10 @@ def compare_experiments(
         before_score = before.get("judge_score")
         after_score = after.get("judge_score")
         if before_score is None or after_score is None:
+            reasons.append(f"{case_id}_judge_unavailable")
             continue
+        if before.get("retrieval") is None or after.get("retrieval") is None:
+            reasons.append(f"{case_id}_retrieval_unavailable")
         score_delta = round(float(after_score) - float(before_score), 4)
         if score_delta < -max_case_judge_drop:
             regressed_cases.append(

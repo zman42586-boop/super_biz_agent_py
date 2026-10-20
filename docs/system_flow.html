@@ -193,26 +193,30 @@ flowchart TD
   <!-- ============ 3. 诊断主循环 ============ -->
   <section class="chart-card">
     <h2>3 · AIOps 诊断主循环（LangGraph Plan-Execute-Replanner）</h2>
-    <p class="caption">四个节点 + 一条条件边。Executor → Replanner 之间有环（最多 8 步）；Microcompact 把大工具结果落盘，防止 Replanner 上下文被撑爆。</p>
+    <p class="caption">Planner–Executor–Replanner保留；增加Evidence Verifier和最终报告节点。累计8步、20次逻辑工具调用、最多两次验证修正；恢复保留phase、证据与预算。</p>
     <div class="mermaid">
 flowchart TD
   START2([诊断请求])
   PLANNER["Planner 规划器<br/>注入 Hot Memory + Skill + 工具列表<br/>按需调用 retrieve_knowledge<br/>structured_output 生成 Plan<br/>失败回退默认 3 步计划"]
-  EXEC["Executor 执行器<br/>取 plan[0] · bind_tools 3本地+4MCP<br/>LLM 决策 → ToolNode 执行<br/>结果回传合成 · 追加 past_steps"]
+  EXEC["Executor 执行器<br/>取 plan[0] · 按需挂载可用工具<br/>LLM 决策 → ToolGateway执行<br/>结果回传合成 · 追加 past_steps"]
   MICRO{"Microcompact<br/>最新结果 >100 tokens?"}
   ART["落盘 artifacts/<br/>替换为 摘要 + 路径"]
-  REPLAN["Replanner<br/>决策 respond / continue / replan<br/>优先级：respond > continue > replan"]
-  DEC2{有 response<br/>或 plan 为空?}
+  REPLAN["Replanner<br/>决策 respond / continue / replan<br/>基于证据和剩余预算决策"]
+  DEC2{仍需调查?}
+  VERIFY["Evidence Verifier<br/>原文/ID/位置/主机/时间校验<br/>独立Prompt语义验证"]
+  FINAL["Final Report<br/>只渲染已验证结论<br/>失败则原因未确定"]
   END2([保存报告 incidents/<br/>更新 MEMORY.md 索引])
-  HARD["硬约束<br/>MAX_STEPS = 8<br/>≥5 步禁 replan"]
+  HARD["硬约束<br/>MAX_STEPS = 8<br/>MAX_TOOL_CALLS = 20<br/>最多2次验证修正"]
 
   START2 --> PLANNER --> EXEC --> MICRO
   MICRO -- 是 --> ART --> REPLAN
   MICRO -- 否 --> REPLAN
   HARD -.约束.-> REPLAN
   REPLAN --> DEC2
-  DEC2 -- response --> END2
-  DEC2 -- 继续执行 --> EXEC
+  DEC2 -- 否 --> VERIFY
+  DEC2 -- 是且有预算 --> EXEC
+  VERIFY -- 可修正 --> REPLAN
+  VERIFY -- 通过或安全结束 --> FINAL --> END2
 
   classDef aquaNode fill:#d3eee4,stroke:#1baf7a,stroke-width:1.5px,color:#0b0b0b
   classDef greenNode fill:#cfe6ce,stroke:#008300,stroke-width:1.5px,color:#0b0b0b
@@ -227,14 +231,14 @@ flowchart TD
   <!-- ============ 4. RAG ============ -->
   <section class="chart-card">
     <h2>4 · RAG 混合检索管线</h2>
-    <p class="caption">Dense + BM25 并行召回 → RRF 融合 → 置信度决定是否改写重试 / 重排。语义证据不足时明确拒答"原因未确定"，而不是编造根因。阈值：low 0.35 / high 0.55。</p>
+    <p class="caption">Dense + BM25 并行召回 → RRF 融合 → 置信度决定是否改写重试 / 重排。语义证据不足时明确拒答"原因未确定"，而不是编造根因。双路Top10的一致性和唯一Parent覆盖决定路由；0.55仅为CrossEncoder语义阈值。</p>
     <div class="mermaid">
 flowchart TD
   Q1([诊断查询])
   DENSE["Dense 召回<br/>BGE-small-zh 512 维<br/>FLAT + IP · top 20"]
   SPARSE["Sparse 召回<br/>Milvus BM25 中文分词<br/>top 20"]
   RRF["RRF 融合 k=60<br/>去重后 top 20"]
-  CONF{"置信度计算<br/>标记命中 · 词汇覆盖<br/>来源集中度 · 可信度"}
+  CONF{"置信度计算<br/>Dense/BM25双路Top10<br/>唯一Parent覆盖"}
   REWRITE["规则化查询改写<br/>仅重试 1 次"]
   RERANK["CrossEncoder 重排<br/>权重 0.20"]
   OUT["Top 5 证据文档"]

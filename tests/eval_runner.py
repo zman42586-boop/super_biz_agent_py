@@ -22,6 +22,9 @@ import time
 from pathlib import Path
 
 from app.evaluation.experiment import build_experiment_report, compare_experiments
+from app.evaluation.pooling import fingerprint
+from app.services.document_identity import digest
+from app.config import config
 from app.models.alert import AlertEvidence, AlertRecord
 from app.services.aiops_service import aiops_service
 from tests.eval_judge import EvalScore, judge_report, load_scenario
@@ -63,7 +66,9 @@ async def run_one(scenario: dict) -> tuple[dict, str | None, EvalScore | None, d
     """跑单个场景，返回 (scenario, report, judge_score, retrieval_metrics)。"""
     alert = build_alert_record(scenario)
     retrieval = compute_metrics(scenario, top_k=5)
-    report = await aiops_service.execute_alert_diagnosis(alert)
+    report = await aiops_service.execute_alert_diagnosis(alert, evaluation_mode=True)
+    graph_state = aiops_service.graph.get_state({"configurable": {"thread_id": f"alert_{alert.alert_id}"}}).values
+    retrieval["diagnosis_verification"] = {key: graph_state.get(key) for key in ("candidate_verified", "verification_attempts", "verification", "candidate_diagnosis")}
     score = await judge_report(scenario, report)
     return scenario, report, score, retrieval
 
@@ -241,6 +246,10 @@ def main() -> None:
         cases.append(
             {
                 "id": scenario["id"],
+                "input_hash": fingerprint(scenario.get("alert", {})),
+                "judgments_hash": fingerprint({key: scenario.get(key) for key in ("expected", "ground_truth", "relevant_docs")}),
+                "report": _report,
+                "diagnosis_verification": (retrieval or {}).get("diagnosis_verification"),
                 "name": scenario["name"],
                 "judge_score": score.score if score else None,
                 "judge": score.model_dump() if score else None,
@@ -255,7 +264,18 @@ def main() -> None:
                 ),
             }
         )
-    experiment = build_experiment_report(args.experiment, cases)
+    root = SCENARIOS_DIR.parents[1]
+    corpus = {path.relative_to(root).as_posix(): digest(path.read_text(encoding="utf-8"))
+              for directory in (root / "aiops-docs", root / "oncall_knowledge_docs_50")
+              for path in sorted(directory.rglob("*.md"))}
+    experiment = build_experiment_report(args.experiment, cases, metadata={
+        "protocol": "evidence-verifier-v1;legacy-document-qrels-fixed-k;MRR@5",
+        "corpus_hash": fingerprint(corpus), "model": config.dashscope_model,
+        "judge_model": config.eval_judge_model,
+        "runtime_tools": "disabled_for_synthetic_scenarios", "planner_memory": "disabled",
+        "retrieval_settings": {key: value for key, value in config.model_dump().items()
+                                if key.startswith("rag_") or key.startswith("chunk_")},
+    })
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(

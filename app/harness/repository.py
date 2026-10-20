@@ -540,6 +540,25 @@ class HarnessRepository:
             return True
 
     @fenced_write
+    def reserve_run_deadline(self, run_id: str, timeout_seconds: float) -> tuple[float, dict]:
+        """Persist the first-claim deadline; recovery never starts a fresh timer."""
+        with self._session_factory.begin() as session:
+            run = self._assert_owned(session, run_id)
+            now = self.db_now(session)
+            state = dict(run.state_json or {})
+            if state.get("deadline_at"):
+                deadline = datetime.fromisoformat(state["deadline_at"].replace("Z", "+00:00"))
+                if deadline.tzinfo:
+                    from datetime import UTC
+
+                    deadline = deadline.astimezone(UTC).replace(tzinfo=None)
+            else:
+                deadline = (run.started_at or now) + timedelta(seconds=max(0.001, timeout_seconds))
+                state["deadline_at"] = deadline.isoformat() + "Z"
+                run.state_json = state
+            return max(0.0, (deadline - now).total_seconds()), state
+
+    @fenced_write
     def merge_checkpoint(self, run_id: str, node_name: str, state_update: dict) -> None:
         safe_update = _json_safe(state_update or {})
         now = utc_now()
@@ -616,6 +635,7 @@ class HarnessRepository:
         *,
         output: Any,
         artifact_path: str | None = None,
+        evidence: list[dict] | None = None,
     ) -> None:
         now = utc_now()
         with self._session_factory.begin() as session:
@@ -626,6 +646,8 @@ class HarnessRepository:
             session.refresh(step, with_for_update=True)
             step.status = "succeeded"
             step.output_json = {"content": _json_safe(output)}
+            if evidence is not None:
+                step.output_json["evidence"] = _json_safe(evidence)
             step.output_artifact_path = artifact_path
             step.error_code = None
             step.error_message = None

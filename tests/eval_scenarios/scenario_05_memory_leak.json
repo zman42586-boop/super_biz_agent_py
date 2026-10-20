@@ -1,7 +1,7 @@
 {
   "id": "scenario_05_memory_leak",
-  "name": "MATLAB 内存泄漏导致系统 OOM Killer",
-  "description": "MATLAB 循环中动态扩容，内存持续增长，系统 OOM Killer 杀掉进程",
+  "name": "高内存快照与进程退出，根因未确定",
+  "description": "进程退出时存在高内存快照；没有连续增长趋势或系统终止事件证据",
   "alert": {
     "host": "simulation-pc",
     "severity": "critical",
@@ -22,15 +22,30 @@
         "memory_used_gb": 31.7,
         "memory_total_gb": 32.0,
         "top_processes": [
-          {"name": "MATLAB.exe", "cpu": 15.0, "memory": 94.0}
+          {
+            "name": "MATLAB.exe",
+            "cpu": 15.0,
+            "memory": 94.0
+          }
         ]
       }
     }
   },
   "expected": {
-    "must_mention": ["内存", "OOM Killer", "泄漏", "系统杀进程"],
-    "should_mention": ["动态扩容", "preallocate", "分段加载", "内存监控"],
-    "must_not_mention": ["栈溢出", "指针"]
+    "must_mention": [
+      "内存",
+      "原因未确定"
+    ],
+    "should_mention": [
+      "历史趋势",
+      "运行日志",
+      "系统事件",
+      "不能确认泄漏"
+    ],
+    "must_not_mention": [
+      "栈溢出",
+      "指针"
+    ]
   },
   "max_score": 10,
   "relevant_docs": [
@@ -38,5 +53,25 @@
     "matlab_error_codes_reference",
     "matlab_profiler_guide",
     "matlab_official_memory_oom_runbook"
-  ]
+  ],
+  "data_provenance": {
+    "kind": "synthetic_fixture",
+    "real_injection_observed": false,
+    "human_relevance_review": "not_recorded",
+    "version": "evidence-boundary-v1"
+  },
+  "ground_truth": {
+    "status": "unknown",
+    "root_cause": null,
+    "confirmed": [
+      "进程退出事件",
+      "单次高内存快照"
+    ],
+    "unconfirmed": [
+      "内存泄漏",
+      "OOM Killer",
+      "动态扩容",
+      "系统杀进程"
+    ]
+  }
 }

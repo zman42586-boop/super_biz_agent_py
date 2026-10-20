@@ -11,8 +11,8 @@ from app.harness.runtime import get_run_context
 def read_host_history() -> str:
     """读取当前失联诊断任务的故障前指标采样和 MATLAB 关键日志，含 evidence_id/UTC 接收时间。"""
     context = get_run_context()
-    if not context or not context.offline_host:
-        return "历史主机证据 unavailable：当前不是主机失联任务"
+    if not context or not (context.offline_host or context.host_id):
+        return "历史主机证据 unavailable：当前任务没有目标主机"
     history = context.evidence or {}
     metrics = history.get("metrics", [])
     stride = max(1, len(metrics) // 60)
@@ -22,14 +22,14 @@ def read_host_history() -> str:
     ]
     return json.dumps(
         {
-            "host": context.offline_host,
+            "host": context.offline_host or context.host_id,
             "metrics": metrics[::stride][-60:],
             "logs": logs,
             "total_metrics": len(metrics),
             "total_logs": len(history.get("logs", [])),
             "sampled": True,
-            "MCP": "unavailable",
-            "search_log": "unavailable",
+            "MCP": "unavailable" if context.offline_host else "current_snapshot_only",
+            "search_log": "unavailable" if context.offline_host else "FastAPI_service_logs_only",
         },
         ensure_ascii=False,
     )
@@ -39,6 +39,8 @@ async def available_tools(local_tools, discover):
     context = get_run_context()
     if context and context.offline_host:
         return [t for t in local_tools if t.name != "search_log"] + [read_host_history], []
+    if context and context.host_id:
+        local_tools = list(local_tools) + [read_host_history]
     return local_tools, await discover()
 
 
