@@ -52,6 +52,36 @@ def test_empty_retrieval_retries_only_once(monkeypatch) -> None:
     assert outcome.confidence.level == "low"
 
 
+def test_reranker_failure_keeps_candidates_but_is_not_confident_success(monkeypatch):
+    import app.services.vector_store_manager as module
+    from app.services.vector_store_manager import VectorStoreManager
+    from unittest.mock import Mock
+
+    manager = VectorStoreManager.__new__(VectorStoreManager)
+    monkeypatch.setattr(manager, "_hybrid_candidates", lambda *args: [_candidate("a.md")])
+    score = Mock(side_effect=OSError("weights missing"))
+    monkeypatch.setattr(module, "score_documents", score)
+    outcome = manager.search_with_diagnostics("memory", k=1)
+    assert outcome.documents and outcome.confidence.level == "low"
+    assert outcome.reranker_used and not outcome.reranker_succeeded
+    assert outcome.error == "reranker_unavailable:OSError"
+    score.assert_called_once()  # The fallback must not attempt the same failed model again.
+
+
+def test_technical_failure_is_not_counted_as_correct_abstention(monkeypatch):
+    from app.services.vector_store_manager import RetrievalOutcome, vector_store_manager
+    from app.services.retrieval_confidence import ConfidenceResult
+    from tests import eval_adaptive_retrieval as evaluation
+
+    monkeypatch.setattr(evaluation, "_load_cases", lambda: [{"id": "q", "query": "memory", "relevant_docs": ["a.md"]}])
+    monkeypatch.setattr(evaluation, "NO_ANSWER_QUERIES", ["unanswerable"])
+    monkeypatch.setattr(vector_store_manager, "search_with_diagnostics", lambda *args, **kwargs:
+                        RetrievalOutcome([], ConfidenceResult(0, "low"), "q", "q", 1, False, False, (), error="service_down"))
+    summary = evaluation.run()["summary"]
+    assert summary["error_count"] == 2
+    assert summary["abstention_evaluable_count"] == 0 and summary["correct_abstention_rate"] is None
+
+
 def test_insufficient_dual_rank_parents_use_cross_encoder(monkeypatch) -> None:
     import app.services.vector_store_manager as module
     from app.services.vector_store_manager import VectorStoreManager

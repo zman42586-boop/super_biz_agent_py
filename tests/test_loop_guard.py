@@ -208,7 +208,7 @@ async def test_executor_stops_repeated_step_before_llm_call(tmp_path) -> None:
         "steps_summary": "",
     }
 
-    with harness_run_context(HarnessRunContext(run["id"], repository)):
+    with harness_run_context(HarnessRunContext(run["id"], repository, "worker", 1)):
         update = await executor(state)
 
     assert update["plan"] == []
@@ -232,7 +232,7 @@ async def test_tool_guard_blocks_third_identical_call_and_records_event(tmp_path
     guard = LoopGuard(LoopGuardPolicy(max_tool_calls=10, max_repeated_tool_calls=2))
     gateway = ToolGateway({"echo": ToolPolicy(timeout_seconds=1, max_retries=0)}, guard=guard)
 
-    with harness_run_context(HarnessRunContext(run["id"], repository)):
+    with harness_run_context(HarnessRunContext(run["id"], repository, "worker", 1)):
         for step_index in range(2):
             step = repository.start_step(run["id"], step_index, f"echo {step_index}")
             await gateway.execute(

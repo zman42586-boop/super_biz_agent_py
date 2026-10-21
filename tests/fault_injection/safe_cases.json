@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "version": "safe-matlab-design-v1",
+  "status": "designed_not_executed",
+  "cases": [
+    {
+      "case_id": "recursion_depth",
+      "script": "recursion_depth.m",
+      "fault_kind": "matlab_error",
+      "injection_method": "在独立测试进程内降低递归限制并运行有限深度递归；退出时恢复设置",
+      "ground_truth": {"cause": "测试函数递归深度超过本次设置的限制", "origin": "injection_design"},
+      "actual_observation": null,
+      "logs": [], "metrics": [], "dump_summary": null, "evidence_ids": [],
+      "knowledge_annotations": [], "max_wall_seconds": 20
+    },
+    {
+      "case_id": "missing_file",
+      "script": "missing_file.m",
+      "fault_kind": "matlab_error",
+      "injection_method": "在临时工作目录中读取确定不存在的文件",
+      "ground_truth": {"cause": "输入文件路径不存在", "origin": "injection_design"},
+      "actual_observation": null,
+      "logs": [], "metrics": [], "dump_summary": null, "evidence_ids": [],
+      "knowledge_annotations": [], "max_wall_seconds": 20
+    },
+    {
+      "case_id": "matrix_dimensions",
+      "script": "matrix_dimensions.m",
+      "fault_kind": "matlab_error",
+      "injection_method": "执行 2x3 与 4x2 小矩阵乘法，触发维度不匹配",
+      "ground_truth": {"cause": "矩阵内维不一致", "origin": "injection_design"},
+      "actual_observation": null,
+      "logs": [], "metrics": [], "dump_summary": null, "evidence_ids": [],
+      "knowledge_annotations": [], "max_wall_seconds": 20
+    },
+    {
+      "case_id": "allocation_failure_simulated",
+      "script": "allocation_failure_simulated.m",
+      "fault_kind": "simulated_matlab_error",
+      "injection_method": "显式抛出带 Simulated 前缀的分配失败异常，不消耗主机内存",
+      "ground_truth": {"cause": "测试脚本模拟分配失败；不代表真实 OOM 或内存泄漏", "origin": "simulation"},
+      "actual_observation": null,
+      "logs": [], "metrics": [], "dump_summary": null, "evidence_ids": [],
+      "knowledge_annotations": [], "max_wall_seconds": 20
+    },
+    {
+      "case_id": "task_deadline",
+      "script": "task_deadline.m",
+      "fault_kind": "bounded_task_timeout",
+      "injection_method": "带五秒截止条件的循环；没有无限循环，也不终止现有 MATLAB 进程",
+      "ground_truth": {"cause": "测试任务未在自身期限内完成", "origin": "injection_design"},
+      "actual_observation": null,
+      "logs": [], "metrics": [], "dump_summary": null, "evidence_ids": [],
+      "knowledge_annotations": [], "max_wall_seconds": 20
+    }
+  ],
+  "disabled_cases": [
+    {"case_id": "real_oom", "reason": "需要可验证的独立资源限制，当前不执行真实内存耗尽"},
+    {"case_id": "mex_crash", "reason": "需要独立安全测试环境，本轮不执行"},
+    {"case_id": "host_down", "reason": "使用现有心跳超时测试验证，不注入真实主机故障"}
+  ]
+}

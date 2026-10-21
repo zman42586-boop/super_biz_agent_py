@@ -16,6 +16,7 @@ if errorlevel 1 (
 echo.
 
 REM 停止 Monitor MCP 服务
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-monitoring.ps1
 echo [2/5] 停止 Monitor MCP 服务...
 taskkill /FI "WINDOWTITLE eq Monitor MCP Server*" /F >nul 2>&1
 if errorlevel 1 (
@@ -38,6 +39,7 @@ echo.
 REM 停止 LHM Alert Agent
 echo [4/5] 停止 LHM Alert Agent...
 taskkill /FI "WINDOWTITLE eq LHM Alert Agent*" /F >nul 2>&1
+taskkill /FI "WINDOWTITLE eq Host Event Agent*" /F >nul 2>&1
 if errorlevel 1 (
     echo [信息] LHM Alert Agent 未运行或已停止
 ) else (

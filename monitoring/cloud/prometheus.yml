@@ -1,0 +1,4 @@
+# Receives samples from local Prometheus. Never scrapes the cloud host as a PC.
+global:
+  scrape_interval: 15s
+scrape_configs: []

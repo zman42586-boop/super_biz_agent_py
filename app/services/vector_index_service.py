@@ -3,7 +3,6 @@
 from datetime import datetime
 import hashlib
 from pathlib import Path
-import re
 from typing import Any, Dict, Optional
 
 from loguru import logger
@@ -73,51 +72,9 @@ class VectorIndexService:
         - 删除包含“模拟运维知识库内容/用于演示/用于验证”等提示语的段落
         - 删除“检索与演示建议”章节（通常是模板化内容，容易污染检索）
         """
-        if not content:
-            return content
+        from app.services.document_preprocessing import preprocess_content
 
-        lines = content.splitlines()
-        out: list[str] = []
-
-        skip_demo_section = False
-
-        # 章节标题匹配（只处理 markdown 二级标题的“检索与演示建议”模块）
-        demo_section_title = re.compile(r"^\s*##\s*\d+\.?\s*检索与演示建议\s*$")
-
-        # 常见的“模拟/演示”提示语（按行过滤，避免遗漏）
-        boilerplate_markers = (
-            "模拟运维知识库内容",
-            "用于演示",
-            "用于验证 RAG",
-            "用于验证向量检索",
-            "用于验证 RAG 检索",
-            "simulated_oncall_knowledge_base",
-        )
-
-        for line in lines:
-            # 进入/退出“检索与演示建议”章节
-            if demo_section_title.match(line):
-                skip_demo_section = True
-                continue
-            if skip_demo_section:
-                # 遇到下一个二级标题则退出跳过状态
-                if re.match(r"^\s*##\s+", line):
-                    skip_demo_section = False
-                else:
-                    continue
-
-            # 过滤包含 boilerplate 的行（通常是一个独立段落）
-            if any(marker in line for marker in boilerplate_markers):
-                continue
-
-            out.append(line)
-
-        cleaned = "\n".join(out).strip()
-        if cleaned != content.strip():
-            logger.info(
-                f"预处理已应用: {source}, 原长度={len(content)}, 新长度={len(cleaned)}"
-            )
-        return cleaned
+        return preprocess_content(content)
 
     def _dedupe_documents(self, documents: list) -> list:
         """对分片进行去重（按内容哈希），避免重复模板导致召回噪声。"""

@@ -11,13 +11,13 @@ from app.services.retrieval_context import (
     format_diagnostic_context,
     format_planner_context,
 )
-from app.services.vector_store_manager import vector_store_manager
 
 
 @tool(response_format="content_and_artifact")
 def retrieve_knowledge(
     query: str,
     mode: Literal["diagnostic", "plan"] = "diagnostic",
+    source_types: list[Literal["official", "case", "incident", "knowledge"]] | None = None,
 ) -> tuple[str, list[Document]]:
     """从知识库中检索相关信息来回答问题
 
@@ -35,10 +35,13 @@ def retrieve_knowledge(
         retrieve_knowledge(query="MATLAB 内存不足历史案例", mode="diagnostic")
     """
     try:
+        # Tool discovery must work when retrieval infrastructure is unavailable.
+        from app.services.vector_store_manager import vector_store_manager
+
         logger.info(f"知识检索工具被调用: query='{query}'")
 
         # 从向量存储中检索相关文档
-        outcome = vector_store_manager.search_with_diagnostics(query, k=config.rag_top_k)
+        outcome = vector_store_manager.search_with_diagnostics(query, k=config.rag_top_k, source_types=source_types)
         docs = outcome.documents
 
         if not docs:

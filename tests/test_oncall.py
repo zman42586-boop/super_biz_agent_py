@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import smtplib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +12,7 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 
 # ── 1. 告警模型校验 ──────────────────────────────────────────────────────
+
 
 def test_alert_ingest_request_valid():
     from app.models.alert import AlertEvidence, AlertIngestRequest
@@ -60,22 +60,24 @@ def test_alert_record_defaults():
 
 # ── 2. config 中 SMTP 字段 ──────────────────────────────────────────────
 
+
 def test_config_smtp_fields():
     from app.config import config
 
     assert config.smtp_host == "smtp.163.com"
     assert config.smtp_port == 465
     assert isinstance(config.smtp_user, str)
-    assert config.oncall_temp_threshold_c == 85.0
-    assert config.oncall_temp_duration_sec == 60
-    assert config.oncall_temp_cooldown_sec == 120
+    assert "oncall_temp_threshold_c" not in type(config).model_fields
+    assert config.prometheus_max_points == 240
+    assert config.prometheus_max_range_sec == 7200
 
 
 # ── 3. SMTP 发送服务（mock SMTP_SSL，不真实发送）──────────────────────
 
+
 def test_send_alert_email_success(monkeypatch):
-    from app.services.mail_service import send_alert_email
     from app.services import mail_service
+    from app.services.mail_service import send_alert_email
 
     monkeypatch.setattr(mail_service.config, "smtp_user", "sender@example.com")
     monkeypatch.setattr(mail_service.config, "smtp_pass", "test-password")
@@ -108,6 +110,7 @@ def test_send_alert_email_missing_config(monkeypatch):
 
 
 # ── 4. 邮件正文构造 ─────────────────────────────────────────────────────
+
 
 def test_build_alert_email_body():
     from app.services.mail_service import build_alert_email_body
@@ -150,13 +153,16 @@ def test_build_alert_email_body_with_report():
 
 # ── 5. AlertService 去重逻辑 ───────────────────────────────────────────
 
+
 @pytest.mark.asyncio
-async def test_alert_service_dedup():
+async def test_alert_service_dedup(tmp_path):
     """相同 host+sensor_id 的活跃告警不应重复处理。"""
+    from app.harness.repository import HarnessRepository
     from app.models.alert import AlertEvidence, AlertIngestRequest
     from app.services.alert_service import AlertService
 
-    svc = AlertService()
+    repository = HarnessRepository(f"sqlite+pysqlite:///{(tmp_path / 'dedup.sqlite').as_posix()}")
+    svc = AlertService(repository_factory=lambda: repository)
 
     req = AlertIngestRequest(
         source="lhm",
@@ -185,11 +191,13 @@ async def test_alert_service_dedup():
 
 
 @pytest.mark.asyncio
-async def test_alert_service_resolve():
+async def test_alert_service_resolve(tmp_path):
+    from app.harness.repository import HarnessRepository
     from app.models.alert import AlertEvidence, AlertIngestRequest
     from app.services.alert_service import AlertService
 
-    svc = AlertService()
+    repository = HarnessRepository(f"sqlite+pysqlite:///{(tmp_path / 'resolve.sqlite').as_posix()}")
+    svc = AlertService(repository_factory=lambda: repository)
     req = AlertIngestRequest(
         source="lhm",
         host="PC2",
@@ -217,40 +225,10 @@ async def test_alert_service_resolve():
 
 # ── 6. LHM 传感器解析（使用 fixture JSON）─────────────────────────────
 
-def test_lhm_sensor_parser():
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    from lhm_alert_agent import _find_sensors
 
-    # 模拟 LHM data.json 的树形结构
-    fixture = {
-        "Text": "Computer",
-        "Type": "Computer",
-        "Children": [
-            {
-                "Text": "AMD Ryzen 9",
-                "Type": "Cpu",
-                "Children": [
-                    {
-                        "Text": "CCDs Max (Tdie)",
-                        "Type": "Temperature",
-                        "Value": "72.3 °C",
-                        "id": "42",
-                    },
-                    {
-                        "Text": "Core #1",
-                        "Type": "Temperature",
-                        "Value": "68.1 °C",
-                        "id": "43",
-                    },
-                ],
-            }
-        ],
-    }
+def test_removed_temperature_is_not_kept_as_host_evidence():
+    from app.harness.evidence import safe_snapshot
 
-    results: list = []
-    _find_sensors(fixture, "CCDs Max (Tdie)", results)
-
-    assert len(results) == 1
-    assert results[0]["value"] == pytest.approx(72.3)
-    assert "CCDs Max" in results[0]["name"]
+    snapshot = safe_snapshot({"cpu_percent": 32, "temperature": 72.3, "temp_threshold": 85})
+    assert snapshot["cpu_percent"] == 32
+    assert "temperature" not in snapshot and "temp_threshold" not in snapshot

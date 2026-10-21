@@ -1,0 +1,302 @@
+[
+  {
+    "id": "stack_overflow_1",
+    "text": "MATLAB 突然退出，崩溃日志显示 stack_overflow，调用栈中同一个递归函数重复出现",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "stack_overflow_2",
+    "text": "递归函数没有终止条件导致 MATLAB 栈溢出，如何用 dbstack 定位",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "stack_overflow_3",
+    "text": "运行深度递归算法后进程消失，错误码 stack overflow",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "stack_overflow_4",
+    "text": "MATLAB crash dump 提示栈空间耗尽，函数调用层级持续增加",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "stack_overflow_5",
+    "text": "迭代可以运行但递归版本让 MATLAB 崩溃，如何排查调用深度",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "access_violation_1",
+    "text": "MATLAB 崩溃日志出现 EXCEPTION_ACCESS_VIOLATION，故障模块是自定义 mexw64",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "access_violation_2",
+    "text": "MEX 调用 mxGetPr 后访问空指针，MATLAB 直接退出",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "access_violation_3",
+    "text": "Windows 事件查看器显示 0xc0000005，matlab.exe 访问违规",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "access_violation_4",
+    "text": "第三方 MEX 文件造成 segmentation violation，怎样定位非法内存访问",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "access_violation_5",
+    "text": "MATLAB crash dump 中 faulting module 为 native extension，疑似野指针",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "out_of_memory_1",
+    "text": "MATLAB 报 Out of Memory，加载大矩阵时系统内存达到 98%",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "out_of_memory_2",
+    "text": "创建超大数组失败，日志显示 cannot allocate memory，如何释放工作区",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "out_of_memory_3",
+    "text": "批量读取 CSV 导致 OOM，是否应该改用 datastore 或 tall array",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "out_of_memory_4",
+    "text": "MATLAB 内存不足并异常退出，如何检查 whos 和数组预分配",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "out_of_memory_5",
+    "text": "处理大型 MAT 文件时 RAM 耗尽，想改成分块加载避免崩溃",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "mex_crash_1",
+    "text": "调用自编译 C++ MEX 后 MATLAB 秒退，没有普通 m 文件异常",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "mex_crash_2",
+    "text": "mexw64 模块崩溃，怀疑 mxMalloc 与 mxFree 配对错误",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "mex_crash_3",
+    "text": "升级 MATLAB 后旧 MEX 二进制不兼容导致进程退出",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "mex_crash_4",
+    "text": "原生扩展重复释放内存，怎样用独立 MATLAB 进程隔离复现",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "mex_crash_5",
+    "text": "只有执行某个 MEX 函数时才出现访问违规和 native stack",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "memory_leak_1",
+    "text": "MATLAB 长时间运行时内存占用持续爬升，最终 OOM",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "memory_leak_2",
+    "text": "循环任务每轮都增加 RAM，clear 以后仍未完全回收",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "memory_leak_3",
+    "text": "服务运行数小时后内存从 2GB 增长到 30GB，疑似句柄泄漏",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "memory_leak_4",
+    "text": "MATLAB worker 内存缓慢上涨，需要定位动态扩容和未释放对象",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "memory_leak_5",
+    "text": "没有瞬时大数组，但进程内存趋势持续上升并最终崩溃",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "high_cpu_1",
+    "text": "MATLAB CPU 连续十分钟 100%，界面无响应但进程仍存在",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "high_cpu_2",
+    "text": "计算任务占满所有核心，如何用 profile viewer 找热点函数",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "high_cpu_3",
+    "text": "for 循环导致高 CPU，想比较向量化、parfor 和 timeit",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "high_cpu_4",
+    "text": "MATLAB 没有崩溃但负载长期过高，需要区分正常计算和死循环",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "high_cpu_5",
+    "text": "轮询发现 matlab.exe CPU 95%，怎样采集 profiler 证据",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "gpu_crash_1",
+    "text": "MATLAB 使用 gpuArray 时显存耗尽，报 CUDA out of memory",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "gpu_crash_2",
+    "text": "绘图后 MATLAB 闪退，崩溃模块指向 NVIDIA 显卡驱动",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "gpu_crash_3",
+    "text": "Linux 日志出现 NVIDIA Xid，随后 MATLAB GPU 计算进程消失",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "gpu_crash_4",
+    "text": "深度学习训练占满 VRAM 后 MATLAB 退出，如何 reset gpuDevice",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "gpu_crash_5",
+    "text": "切换软件 OpenGL 后不再崩溃，怀疑图形驱动兼容问题",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "process_exit_1",
+    "text": "上次轮询 MATLAB 存在，这次进程消失，但没有找到 crash dump",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "process_exit_2",
+    "text": "matlab.exe 无提示退出，应该检查 Windows Event 1000 和退出码",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "process_exit_3",
+    "text": "如何为 MATLAB 配置 Windows Error Reporting LocalDumps",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "process_exit_4",
+    "text": "进程异常结束但日志目录为空，需要收集事件查看器证据",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "process_exit_5",
+    "text": "无法判断用户手动关闭还是崩溃，如何结合退出码和 WER 排查",
+    "split": "development",
+    "answerability": "legacy_answerable_assumption_unreviewed"
+  },
+  {
+    "id": "no_answer_1",
+    "text": "公司私有 acme_solver.mexw64 报 E9472，内部协议握手失败",
+    "split": "development",
+    "answerability": "legacy_out_of_domain_assumption_unreviewed"
+  },
+  {
+    "id": "no_answer_2",
+    "text": "MATLAB Online 与企业 OneDrive 同步冲突，云端文件出现 UNKNOWN_SYNC_77",
+    "split": "development",
+    "answerability": "legacy_out_of_domain_assumption_unreviewed"
+  },
+  {
+    "id": "no_answer_3",
+    "text": "Robotics System Toolbox 的 ROS2 DDS 发现不到自定义域 143",
+    "split": "development",
+    "answerability": "legacy_out_of_domain_assumption_unreviewed"
+  },
+  {
+    "id": "no_answer_4",
+    "text": "OPC UA 客户端证书轮换后 BadCertificateUriInvalid",
+    "split": "development",
+    "answerability": "legacy_out_of_domain_assumption_unreviewed"
+  },
+  {
+    "id": "no_answer_5",
+    "text": "Database Toolbox 连接内部 JDBC 服务时 TLS_ALERT_1205",
+    "split": "development",
+    "answerability": "legacy_out_of_domain_assumption_unreviewed"
+  },
+  {
+    "id": "no_answer_6",
+    "text": "Azure Blob SAS token 刷新后 MATLAB 返回 AUTH_SCOPE_X9",
+    "split": "development",
+    "answerability": "legacy_out_of_domain_assumption_unreviewed"
+  },
+  {
+    "id": "no_answer_7",
+    "text": "Data Acquisition Toolbox 读取 NI PXI 时出现设备码 DAQMX_8842",
+    "split": "development",
+    "answerability": "legacy_out_of_domain_assumption_unreviewed"
+  },
+  {
+    "id": "no_answer_8",
+    "text": "MATLAB Coder 为私有 DSP 内核生成代码时 INTERNAL_CG_451",
+    "split": "development",
+    "answerability": "legacy_out_of_domain_assumption_unreviewed"
+  },
+  {
+    "id": "no_answer_9",
+    "text": "Stateflow 私有图模型报语义检查码 SF_SEMANTIC_702",
+    "split": "development",
+    "answerability": "legacy_out_of_domain_assumption_unreviewed"
+  },
+  {
+    "id": "no_answer_10",
+    "text": "SimBiology 自定义动力学出现 NEGATIVE_STATE_CUSTOM_19",
+    "split": "development",
+    "answerability": "legacy_out_of_domain_assumption_unreviewed"
+  }
+]

@@ -41,15 +41,15 @@ def evidence_keys(step_result: Any) -> set[str] | None:
             understood = True
             for log_id in facts.get("log_ids", []):
                 keys.add(_key(name, identity, "log", str(log_id)))
-        elif name in {"query_cpu_metrics", "query_memory_metrics", "get_lhm_temperature"}:
+        elif name in {"query_cpu_metrics", "query_memory_metrics"}:
             understood = True
             state = _metric_state(name, facts)
             if state is not None:
                 keys.add(_key(name, identity, "state", state))
-        elif name == "list_lhm_sensors":
+        elif name == "query_prometheus_metrics":
             understood = True
-            if isinstance(facts.get("total"), int):
-                keys.add(_key(name, identity, "sensor_count", facts["total"]))
+            if facts.get("observation_signature"):
+                keys.add(_key(name, facts.get("host_id"), facts.get("metric_name"), facts["observation_signature"]))
         elif name == "get_current_time":
             # A newer clock reading is not new diagnostic evidence.
             understood = True
@@ -77,7 +77,6 @@ def _identity(name: str, facts: Mapping[str, Any]) -> str:
         facts.get("service_name")
         or facts.get("sensor_id")
         or facts.get("sensor_name")
-        or facts.get("lhm_base_url")
         or "default"
     )
 
@@ -86,7 +85,6 @@ def _metric_state(name: str, facts: Mapping[str, Any]) -> str | None:
     value_field = {
         "query_cpu_metrics": "current_cpu_percent",
         "query_memory_metrics": "current_memory_percent",
-        "get_lhm_temperature": "value_c",
     }[name]
     value = facts.get(value_field)
     if not isinstance(value, (int, float)) or isinstance(value, bool):
@@ -99,6 +97,5 @@ def _metric_state(name: str, facts: Mapping[str, Any]) -> str | None:
         threshold = {
             "query_cpu_metrics": 80.0,
             "query_memory_metrics": 70.0,
-            "get_lhm_temperature": 50.0,
         }[name]
     return "abnormal" if value >= threshold else "normal"

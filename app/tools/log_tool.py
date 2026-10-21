@@ -6,6 +6,7 @@ import glob
 import hashlib
 import os
 import re
+import socket
 from collections import deque
 from datetime import datetime, timedelta
 from typing import Any
@@ -118,6 +119,8 @@ def search_log(query: str = "", minutes: int = 60, limit: int = 100) -> dict[str
             logger.warning(f"读取日志文件失败: {log_file}, error={exc}")
 
     raw_result = {
+        "host_id": socket.gethostname(),
+        "source_type": "FastAPI_service_log",
         "query": query,
         "time_range": {
             "start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),

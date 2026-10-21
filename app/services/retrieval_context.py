@@ -29,9 +29,9 @@ def format_diagnostic_context(query: str, outcome) -> str:
     diagnostics = outcome.confidence
     status = "证据基本充分" if diagnostics.level != "low" else "证据不足，禁止确定性归因"
     evidence = format_docs(outcome.documents) if outcome.documents else "未检索到可用知识库证据。"
-    return f"""## 日志与告警事实
+    return f"""## 检索查询（不构成事实证据）
 
-以下内容来自本次输入，只能视为已观测事实：
+以下内容可能由模型生成，仅用于检索。不能将查询中的假设当作已观测事实：
 
 {query}
 
@@ -42,12 +42,14 @@ def format_diagnostic_context(query: str, outcome) -> str:
 - 检索次数：{outcome.attempts}
 - 查询是否改写：{outcome.rewritten}
 - 是否使用 Cross-Encoder：{outcome.reranker_used}
+- Cross-Encoder 是否成功：{getattr(outcome, 'reranker_succeeded', False)}
+- 技术降级：{getattr(outcome, 'error', None) or '无'}
 
 {evidence}
 
 ## 推断约束
 
-- 只能把“日志与告警事实”写成确定事实。
+- 本次事实只能来自证据注册表中的 incident_fact，不能从检索查询推导事实。
 - 知识库内容用于说明可能原因和排查方法，不代表已经证明本次根因。
 - 根因必须同时引用本次日志事实和对应知识库证据；否则标为“推测”。
 - 检索状态为证据不足时，必须输出“原因未确定”以及需要补充的日志、dump或系统指标。"""

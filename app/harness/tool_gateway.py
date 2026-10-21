@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import time
+from datetime import UTC, datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ class ToolExecutionResult:
     cached: bool = False
     artifact_path: str | None = None
     structured_content: dict[str, Any] | None = None
+    evidence: list[dict[str, Any]] | None = None
 
 
 def _safe_json(value: Any) -> Any:
@@ -69,6 +71,8 @@ def _prepared_result(tool_name: str, result: Any) -> tuple[str, dict[str, Any] |
         content_value = content_value[0]
 
     safe_value = _safe_json(content_value)
+    if isinstance(safe_value, list) and len(safe_value) == 1 and isinstance(safe_value[0], dict):
+        safe_value = safe_value[0].get("text", safe_value)
     # MCP adapters commonly expose a JSON object as text. Parse it before
     # normalizing so monitoring snapshots retain comparable key_facts.
     if isinstance(safe_value, str):
@@ -140,11 +144,41 @@ class ToolGateway:
         arguments: dict[str, Any],
         step_id: int | None = None,
         step_index: int = 0,
+        evidence_context: dict | None = None,
+        call_history: list[dict] | None = None,
+        budget_offset: int = 0,
     ) -> ToolExecutionResult:
         tool_name = str(getattr(tool, "name", getattr(tool, "__name__", "unknown")))
         policy = self.policies.get(tool_name, ToolPolicy())
         validated = _validate_arguments(tool, arguments)
+        if tool_name == "retrieve_knowledge" and (evidence_context or {}).get("evaluation_mode"):
+            validated["source_types"] = ["official", "case", "knowledge"]
         context = get_run_context()
+        if tool_name == "query_prometheus_metrics" and context:
+            target = context.host_id or context.offline_host
+            if target and validated.get("host_id") != target:
+                raise ToolExecutionError("INVALID_ARGUMENTS", "Metric host_id must match the diagnosis host")
+            if context.offline_host:
+                from datetime import timedelta
+                from app.monitoring.prometheus import utc_datetime
+
+                cutoff = context.metrics_end_time
+                if not cutoff:
+                    raise ToolExecutionError("TOOL_UNAVAILABLE", "Offline metric query has no frozen cutoff")
+                try:
+                    end = utc_datetime(validated.get("end_time"), utc_datetime(cutoff))
+                    if end > utc_datetime(cutoff):
+                        raise ValueError("Offline metric query must end before the frozen last heartbeat")
+                    validated["end_time"] = end.isoformat()
+                    validated["start_time"] = validated.get("start_time") or (end - timedelta(minutes=10)).isoformat()
+                except ValueError as exc:
+                    raise ToolExecutionError("INVALID_ARGUMENTS", str(exc)) from exc
+        if (
+            context
+            and context.offline_host
+            and tool_name not in {"read_host_history", "retrieve_knowledge", "get_current_time", "query_prometheus_metrics"}
+        ):
+            raise ToolExecutionError("TOOL_UNAVAILABLE", f"{tool_name} unavailable: host offline")
         idempotency_key = self._idempotency_key(
             context.run_id if context else "adhoc", step_index, tool_name, validated
         )
@@ -154,6 +188,25 @@ class ToolGateway:
             existing_calls = await asyncio.to_thread(
                 context.repository.list_tool_calls, context.run_id
             )
+            if not policy.read_only and any(
+                call.get("idempotency_key") == idempotency_key
+                and call.get("status") in {"running", "failed", "retrying"}
+                for call in existing_calls
+            ):
+                await asyncio.to_thread(
+                    context.repository.append_event,
+                    context.run_id,
+                    "external_tool_replay_blocked",
+                    {
+                        "tool_name": tool_name,
+                        "version": context.version,
+                        "potential_duplicate_execution": True,
+                    },
+                )
+                raise ToolExecutionError(
+                    "TOOL_EXECUTION_UNCERTAIN",
+                    "Verify the previous external operation before replay",
+                )
             # Replaying the same call in one step is an idempotent cache hit,
             # not a new observation and must not trip the sampling interval.
             cached_in_step = any(
@@ -162,7 +215,7 @@ class ToolGateway:
             )
             if not cached_in_step:
                 guard_decision = self.loop_guard.evaluate_tool_call(
-                    tool_name, validated, existing_calls
+                    tool_name, validated, existing_calls + [{} for _ in range(budget_offset)]
                 )
                 if not guard_decision.allowed:
                     payload = guard_decision.event_payload("tool_call")
@@ -193,24 +246,60 @@ class ToolGateway:
                     cached=True,
                     artifact_path=call_row.get("result_artifact_path"),
                     structured_content=result.get("structured_content"),
+                    evidence=result.get("evidence", []),
                 )
 
-        attempts = max(1, policy.max_retries + 1)
+        if context is None and call_history is not None:
+            decision = self.loop_guard.evaluate_tool_call(
+                tool_name, validated, call_history + [{} for _ in range(budget_offset)]
+            )
+            if not decision.allowed:
+                raise ToolExecutionError(f"LOOP_GUARD_{decision.reason.upper()}", decision.message)
+            call_history.append({"tool_name": tool_name, "arguments": validated,
+                                 "started_at": datetime.now(UTC).isoformat()})
+
+        # A non-read-only request may have succeeded despite a lost response.
+        attempts = max(1, policy.max_retries + 1) if policy.read_only else 1
         total_started = time.perf_counter()
         last_error: ToolExecutionError | None = None
         call_id = int(call_row["id"]) if call_row else None
 
         for attempt in range(1, attempts + 1):
+            if context is not None:
+                owned = await asyncio.to_thread(
+                    context.repository.check_ownership,
+                    context.run_id,
+                    context.worker_id,
+                    context.version,
+                )
+                if not owned:
+                    from app.harness.repository import LeaseLostError
+
+                    raise LeaseLostError("Lost lease before tool invocation")
             started = time.perf_counter()
             try:
                 raw_result = await asyncio.wait_for(
                     self._invoke(tool, validated), timeout=policy.timeout_seconds
                 )
+                if context is not None and not await asyncio.to_thread(
+                    context.repository.check_ownership,
+                    context.run_id,
+                    context.worker_id,
+                    context.version,
+                ):
+                    from app.harness.repository import LeaseLostError
+
+                    raise LeaseLostError(
+                        "Lost lease during tool invocation; remote execution may have completed"
+                    )
                 result_text, structured_content = _prepared_result(tool_name, raw_result)
+                from app.agent.aiops.evidence import tool_evidence
+
+                evidence = tool_evidence(tool_name, raw_result, evidence_context or {})
                 content, artifact_path, structured_content = await asyncio.to_thread(
                     self._limit_result,
                     context.run_id if context else "adhoc",
-                    idempotency_key,
+                    f"{idempotency_key}:version:{context.version}" if context else idempotency_key,
                     result_text,
                     policy.max_output_chars,
                     structured_content,
@@ -223,6 +312,7 @@ class ToolGateway:
                         result={
                             "content": content,
                             "structured_content": structured_content,
+                            "evidence": evidence,
                         },
                         latency_ms=latency_ms,
                         artifact_path=artifact_path,
@@ -234,8 +324,13 @@ class ToolGateway:
                     latency_ms=latency_ms,
                     artifact_path=artifact_path,
                     structured_content=structured_content,
+                    evidence=evidence,
                 )
             except BaseException as exc:
+                from app.harness.repository import LeaseLostError
+
+                if isinstance(exc, LeaseLostError):
+                    raise
                 if isinstance(exc, asyncio.CancelledError):
                     raise
                 last_error = _classify_error(exc)
@@ -272,6 +367,7 @@ class ToolGateway:
                             cached=True,
                             artifact_path=call_row.get("result_artifact_path"),
                             structured_content=result.get("structured_content"),
+                            evidence=result.get("evidence", []),
                         )
 
         raise last_error or ToolExecutionError("TOOL_EXECUTION_FAILED", "Unknown tool error")
@@ -279,6 +375,9 @@ class ToolGateway:
     @staticmethod
     async def _invoke(tool: Any, arguments: dict[str, Any]) -> Any:
         if hasattr(tool, "ainvoke"):
+            if getattr(tool, "response_format", "") == "content_and_artifact":
+                return await tool.ainvoke({"name": tool.name, "args": arguments,
+                                          "id": "evidence-retrieval", "type": "tool_call"})
             return await tool.ainvoke(arguments)
         if hasattr(tool, "invoke"):
             return await asyncio.to_thread(tool.invoke, arguments)

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.config import config
 from app.core.llm_factory import llm_factory
@@ -18,11 +18,17 @@ from app.core.llm_factory import llm_factory
 class EvalScore(BaseModel):
     """评估分数"""
 
-    score: int = Field(description="整体评分 (0-10)")
-    accuracy: int = Field(description="根因分析准确性 (0-4)")
-    evidence: int = Field(description="证据引用充分性 (0-3)")
-    actionable: int = Field(description="建议可操作性 (0-3)")
+    score: int = Field(ge=0, le=10, description="整体评分 (0-10)")
+    accuracy: int = Field(ge=0, le=4, description="根因分析准确性 (0-4)")
+    evidence: int = Field(ge=0, le=3, description="证据引用充分性 (0-3)")
+    actionable: int = Field(ge=0, le=3, description="建议可操作性 (0-3)")
     comment: str = Field(description="简要点评 (50字以内)")
+
+    @model_validator(mode="after")
+    def consistent_total(self):
+        if self.score != self.accuracy + self.evidence + self.actionable:
+            raise ValueError("Judge total must equal the three component scores")
+        return self
 
 
 JUDGE_PROMPT = """你是 AIOps 诊断报告的质量评估裁判。根据以下标准评分:
@@ -32,6 +38,8 @@ JUDGE_PROMPT = """你是 AIOps 诊断报告的质量评估裁判。根据以下�
 - 预期应包含: {must_mention}
 - 预期可包含: {should_mention}
 - 不应出现: {must_not_mention}
+- 根因真值/可观测边界: {ground_truth}
+- 本次实际输入证据: {observations}
 
 **诊断报告:**
 {report}
@@ -39,6 +47,8 @@ JUDGE_PROMPT = """你是 AIOps 诊断报告的质量评估裁判。根据以下�
 **评分标准:**
 - 根因分析准确性 (0-4): 是否准确识别了真实根因？偏离真实根因扣分。
 - 证据引用充分性 (0-3): 是否引用了具体数据/调用栈/日志？空泛扣分。
+- 不得因为命中关键词而奖励没有证据的归因。若真值为未知，诚实报告原因未确定应得分。
+- 场景标题和隐藏根因仅供裁判评估，不能被当成本次可观测证据。
 - 建议可操作性 (0-3): 处理建议是否具体可执行？"建议排查"这类空洞设议不给分。
 
 整体分数 = accuracy + evidence + actionable (0-10)。
@@ -67,7 +77,9 @@ async def judge_report(scenario: dict[str, Any], report: str) -> EvalScore:
         must_mention=", ".join(expected.get("must_mention", [])),
         should_mention=", ".join(expected.get("should_mention", [])),
         must_not_mention=", ".join(expected.get("must_not_mention", [])),
-        report=report[:6000],  # 限制长度，避免超模型上下文
+        ground_truth=json.dumps(scenario.get("ground_truth", {"status": "legacy_synthetic_unreviewed"}), ensure_ascii=False),
+        observations=json.dumps(scenario.get("alert", {}), ensure_ascii=False),
+        report=report,
     )
 
     llm = llm_factory.create_chat_model(

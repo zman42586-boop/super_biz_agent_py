@@ -55,3 +55,19 @@ def test_comparison_rejects_changed_dataset() -> None:
         "deltas": {},
         "regressed_cases": [],
     }
+
+
+def test_same_ids_with_changed_inputs_or_corpus_cannot_pass():
+    before = _case("a", 8, 0.9, 0.9)
+    after = {**before, "input_hash": "changed"}
+    assert not compare_experiments(build_experiment_report("a", [before]),
+                                   build_experiment_report("b", [after]))["passed"]
+    assert not compare_experiments(build_experiment_report("a", [before], {"corpus": "v1"}),
+                                   build_experiment_report("b", [before], {"corpus": "v2"}))["passed"]
+
+
+def test_missing_metrics_cannot_silently_pass_regression_gate():
+    before = _case("a", 8, 0.9, 0.9)
+    after = {**before, "retrieval": None}
+    row = compare_experiments(build_experiment_report("a", [before]), build_experiment_report("b", [after]))
+    assert not row["passed"] and "recall_at_k_unavailable" in row["reasons"]

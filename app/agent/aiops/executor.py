@@ -15,12 +15,15 @@ from app.agent.tool_selector import select_tools_for_task
 from app.claude_skills import list_skill_ids
 from app.core.llm_factory import llm_factory
 from app.harness.loop_guard import loop_guard
-from app.harness.runtime import get_run_context
+from app.harness.repository import LeaseLostError
+from app.harness.runtime import ensure_run_ownership, get_run_context
 from app.harness.tool_gateway import ToolExecutionError, tool_gateway
 from app.tools import get_current_time, retrieve_knowledge, search_log
+from app.tools.host_history import available_tools, offline_notice
 from app.tools.result import make_tool_result
 
 from .state import PlanExecuteState
+from .evidence import register
 
 
 async def executor(state: PlanExecuteState) -> dict[str, Any]:
@@ -29,6 +32,7 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
     所有工具调用统一经过 Harness Tool Gateway
     """
+    await ensure_run_ownership()
     logger.info("=== Executor：执行步骤 ===")
 
     plan = state.get("plan", [])
@@ -43,6 +47,10 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
     logger.info(f"当前任务: {task}")
 
     current_past_steps = list(state.get("past_steps", []))
+    registry = dict(state.get("evidence_registry", {}))
+    call_history = list(state.get("tool_calls", []))
+    collected_evidence = []
+    guard_state = dict(state.get("loop_guard", {}))
     run_context = get_run_context()
     guard_decision = loop_guard.evaluate_step(task, current_past_steps)
     if not guard_decision.allowed:
@@ -65,6 +73,9 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
             "past_steps": current_past_steps
             + [(task, f"LoopGuard 已停止该步骤：{guard_decision.message}")],
             "loop_guard": guard_state,
+            "phase": "microcompact",
+            "candidate_diagnosis": {},
+            "candidate_verified": False,
         }
 
     # Skill 识别：若步骤包含 .claude/skills 中声明的 id，记录日志
@@ -89,6 +100,10 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
             return {
                 "plan": plan[1:],
                 "past_steps": current_past_steps + [(task, stored_result)],
+                "evidence_registry": register(registry, stored.get("evidence", [])),
+                "phase": "microcompact",
+                "candidate_diagnosis": {},
+                "candidate_verified": False,
             }
 
     try:
@@ -101,7 +116,14 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
         # 获取 MCP 工具（失败时降级为仅本地工具）
         try:
-            mcp_tools = await get_mcp_tools_with_circuit_breaker()
+            if state.get("diagnosis_context", {}).get("evaluation_mode"):
+                local_tools, mcp_tools = [get_current_time, retrieve_knowledge], []
+            else:
+                local_tools, mcp_tools = await available_tools(
+                    local_tools, get_mcp_tools_with_circuit_breaker
+                )
+        except LeaseLostError:
+            raise
         except Exception as e:
             logger.warning(f"获取 MCP 工具失败: {e}")
             mcp_tools = []
@@ -119,7 +141,8 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
         # 构建消息（只包含当前步骤，避免原始任务干扰）
         messages = [
-            SystemMessage(content="""你是一个能力强大的助手，负责执行具体的任务步骤。
+            SystemMessage(
+                content="""你是一个能力强大的助手，负责执行具体的任务步骤。
 
 你可以使用各种工具来完成任务。对于每个步骤：
 1. 理解步骤的目标
@@ -132,11 +155,13 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 - 不要编造数据，只返回实际获取的信息
 - 严格区分日志事实、知识库证据和分析推断；证据不足时明确写“原因未确定”
 - 执行结果要清晰、准确
-- 专注于当前步骤，不要考虑其他任务"""),
-            HumanMessage(content=f"请执行以下任务: {task}"),
+- 专注于当前步骤，不要考虑其他任务"""
+            ),
+            HumanMessage(content=f"请执行以下任务: {task}" + offline_notice()),
         ]
 
         # 第一步：LLM 决定是否调用工具
+        await ensure_run_ownership()
         llm_response = await llm_with_tools.ainvoke(messages)
         logger.info(f"LLM 响应类型: {type(llm_response)}")
 
@@ -171,10 +196,18 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
                             arguments=arguments,
                             step_id=int(step_row["id"]) if step_row else None,
                             step_index=step_index,
+                            evidence_context=state.get("diagnosis_context", {}),
+                            call_history=call_history,
+                            budget_offset=int(state.get("prefetch_tool_calls", 0)),
                         )
                         content = execution.content
                         structured_content = execution.structured_content
+                        collected_evidence.extend(execution.evidence or [])
+                        registry = register(registry, execution.evidence or [])
                     except ToolExecutionError as tool_error:
+                        if tool_error.code.startswith("LOOP_GUARD_"):
+                            guard_state = {"reason": tool_error.code.removeprefix("LOOP_GUARD_").lower(),
+                                           "message": str(tool_error)}
                         structured_content = make_tool_result(
                             status="error",
                             summary=str(tool_error),
@@ -212,6 +245,7 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
             # 第三步：将工具结果返回给 LLM 生成最终答案
             messages.extend(tool_messages)
+            await ensure_run_ownership()
             final_response = await llm_with_tools.ainvoke(messages)
             result = (
                 final_response.content
@@ -230,7 +264,9 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
             step_status = (
                 "error"
                 if statuses and all(status == "error" for status in statuses)
-                else "partial" if any(status == "error" for status in statuses) else "success"
+                else "partial"
+                if any(status == "error" for status in statuses)
+                else "success"
             )
             result_for_state = make_tool_result(
                 status=step_status,
@@ -246,14 +282,23 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
                 run_context.repository.complete_step,
                 int(step_row["id"]),
                 output=result_for_state,
+                evidence=collected_evidence,
             )
 
         # past_steps 使用全量替换 reducer，必须返回完整列表
         return {
             "plan": plan[1:],
             "past_steps": current_past_steps + [(task, result_for_state)],
+            "evidence_registry": registry,
+            "tool_calls": call_history,
+            "loop_guard": guard_state,
+            "phase": "microcompact",
+            "candidate_diagnosis": {},
+            "candidate_verified": False,
         }
 
+    except LeaseLostError:
+        raise
     except Exception as e:
         logger.error(f"执行步骤失败: {e}", exc_info=True)
         if run_context is not None and step_row is not None:
@@ -266,4 +311,10 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
         return {
             "plan": plan[1:],
             "past_steps": current_past_steps + [(task, f"执行失败: {str(e)}")],
+            "evidence_registry": registry,
+            "tool_calls": call_history,
+            "loop_guard": guard_state,
+            "phase": "microcompact",
+            "candidate_diagnosis": {},
+            "candidate_verified": False,
         }

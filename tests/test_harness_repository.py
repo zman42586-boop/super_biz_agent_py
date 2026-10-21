@@ -23,19 +23,27 @@ def test_run_step_tool_call_and_event_lifecycle(tmp_path) -> None:
         run["id"],
         "planner",
         {"plan": ["query memory"], "past_steps": []},
+        worker_id="worker-1",
+        version=1,
     )
-    step = repository.start_step(run["id"], 0, "query memory")
+    step = repository.start_step(run["id"], 0, "query memory", worker_id="worker-1", version=1)
     call, cached = repository.begin_tool_call(
         run_id=run["id"],
         step_id=step["id"],
         tool_name="query_memory_metrics",
         arguments={"service_name": "local"},
         idempotency_key="stable-key",
+        worker_id="worker-1",
+        version=1,
     )
     assert cached is False
 
     repository.complete_tool_call(
-        call["id"], result={"content": "memory=60%"}, latency_ms=12
+        call["id"],
+        result={"content": "memory=60%"},
+        latency_ms=12,
+        worker_id="worker-1",
+        version=1,
     )
     cached_call, cached = repository.begin_tool_call(
         run_id=run["id"],
@@ -43,17 +51,21 @@ def test_run_step_tool_call_and_event_lifecycle(tmp_path) -> None:
         tool_name="query_memory_metrics",
         arguments={"service_name": "local"},
         idempotency_key="stable-key",
+        worker_id="worker-1",
+        version=1,
     )
     assert cached is True
     assert cached_call["result"]["content"] == "memory=60%"
 
-    repository.complete_step(step["id"], output="memory is normal")
+    repository.complete_step(step["id"], output="memory is normal", worker_id="worker-1", version=1)
     repository.merge_checkpoint(
         run["id"],
         "executor",
         {"plan": [], "past_steps": [["query memory", "memory is normal"]]},
+        worker_id="worker-1",
+        version=1,
     )
-    repository.finish_run(run["id"], "final report")
+    repository.finish_run(run["id"], "final report", worker_id="worker-1", version=1)
 
     saved = repository.get_run(run["id"])
     assert saved is not None
@@ -97,13 +109,15 @@ def test_agentops_metrics_and_quality_evaluation(tmp_path) -> None:
 
     succeeded = repository.create_run(task="diagnose success", session_id="metrics-1")
     repository.claim_next_run("worker-1", lease_seconds=30)
-    step = repository.start_step(succeeded["id"], 0, "query logs")
+    step = repository.start_step(succeeded["id"], 0, "query logs", worker_id="worker-1", version=1)
     call, _ = repository.begin_tool_call(
         run_id=succeeded["id"],
         step_id=step["id"],
         tool_name="query_logs",
         arguments={"host": "local"},
         idempotency_key="metrics-tool-key",
+        worker_id="worker-1",
+        version=1,
     )
     repository.fail_tool_call(
         call["id"],
@@ -111,6 +125,8 @@ def test_agentops_metrics_and_quality_evaluation(tmp_path) -> None:
         error_message="temporary timeout",
         latency_ms=10,
         terminal=False,
+        worker_id="worker-1",
+        version=1,
     )
     retried, cached = repository.begin_tool_call(
         run_id=succeeded["id"],
@@ -118,17 +134,29 @@ def test_agentops_metrics_and_quality_evaluation(tmp_path) -> None:
         tool_name="query_logs",
         arguments={"host": "local"},
         idempotency_key="metrics-tool-key",
+        worker_id="worker-1",
+        version=1,
     )
     assert cached is False
-    repository.complete_tool_call(retried["id"], result={"content": "ok"}, latency_ms=20)
-    repository.complete_step(step["id"], output="found evidence")
-    repository.append_event(succeeded["id"], "loop_guard_triggered", {"reason": "test"})
-    repository.append_event(succeeded["id"], "run_resumed", {"reason": "test"})
-    repository.finish_run(succeeded["id"], "report")
+    repository.complete_tool_call(
+        retried["id"], result={"content": "ok"}, latency_ms=20, worker_id="worker-1", version=1
+    )
+    repository.complete_step(step["id"], output="found evidence", worker_id="worker-1", version=1)
+    repository.append_event(
+        succeeded["id"],
+        "loop_guard_triggered",
+        {"reason": "test"},
+        worker_id="worker-1",
+        version=1,
+    )
+    repository.append_event(
+        succeeded["id"], "run_resumed", {"reason": "test"}, worker_id="worker-1", version=1
+    )
+    repository.finish_run(succeeded["id"], "report", worker_id="worker-1", version=1)
 
     failed = repository.create_run(task="diagnose failure", session_id="metrics-2")
     repository.claim_next_run("worker-1", lease_seconds=30)
-    repository.fail_run(failed["id"], "RUN_TIMEOUT", "timed out")
+    repository.fail_run(failed["id"], "RUN_TIMEOUT", "timed out", worker_id="worker-1", version=1)
     repository.create_run(task="still queued", session_id="metrics-3")
 
     evaluation = repository.record_evaluation(

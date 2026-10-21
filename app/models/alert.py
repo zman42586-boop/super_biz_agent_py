@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 
 class AlertEvidence(BaseModel):
     """告警证据（传感器最近数据点、崩溃日志等）"""
-    lhm_url: str | None = None
     recent_points: list[list[Any]] = Field(default_factory=list)
     crash_log: str | None = Field(default=None, description="进程崩溃日志摘要")
     crash_type: str | None = Field(default=None, description="崩溃类型: stack_overflow / access_violation 等")
@@ -24,8 +23,8 @@ class AlertIngestRequest(BaseModel):
     source: str = Field(description="数据来源，如 librehardwaremonitor")
     host: str = Field(description="发生告警的主机名")
     severity: str = Field(description="严重等级：warning / critical")
-    alert_name: str = Field(description="告警名称，如 CPU Package Temperature High")
-    metric: str = Field(description="指标名，如 temperature_c")
+    alert_name: str = Field(description="告警名称，如 MATLAB 进程异常退出")
+    metric: str = Field(description="指标名，如 process_exit")
     value: float = Field(description="当前值")
     threshold: float = Field(description="触发阈值")
     duration_sec: int = Field(description="持续超阈值秒数")

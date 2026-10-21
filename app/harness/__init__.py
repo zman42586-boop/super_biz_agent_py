@@ -1,22 +1,25 @@
-"""Durable runtime harness for long-running Agent jobs."""
+"""Durable runtime exports, loaded lazily so the local collector stays lightweight."""
 
-from app.harness.config import HarnessSettings, harness_settings
-from app.harness.loop_guard import LoopGuard, LoopGuardDecision, LoopGuardPolicy
-from app.harness.repository import HarnessRepository, get_harness_repository
-from app.harness.runtime import HarnessRunContext, get_run_context, harness_run_context
-from app.harness.tool_gateway import ToolGateway, ToolPolicy
+from importlib import import_module
 
-__all__ = [
-    "HarnessRepository",
-    "HarnessRunContext",
-    "HarnessSettings",
-    "LoopGuard",
-    "LoopGuardDecision",
-    "LoopGuardPolicy",
-    "ToolGateway",
-    "ToolPolicy",
-    "get_harness_repository",
-    "get_run_context",
-    "harness_run_context",
-    "harness_settings",
-]
+_EXPORTS = {
+    "HarnessRepository": "repository",
+    "get_harness_repository": "repository",
+    "HarnessRunContext": "runtime",
+    "get_run_context": "runtime",
+    "harness_run_context": "runtime",
+    "HarnessSettings": "config",
+    "harness_settings": "config",
+    "LoopGuard": "loop_guard",
+    "LoopGuardDecision": "loop_guard",
+    "LoopGuardPolicy": "loop_guard",
+    "ToolGateway": "tool_gateway",
+    "ToolPolicy": "tool_gateway",
+}
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name):
+    if name in _EXPORTS:
+        return getattr(import_module(f"app.harness.{_EXPORTS[name]}"), name)
+    raise AttributeError(name)

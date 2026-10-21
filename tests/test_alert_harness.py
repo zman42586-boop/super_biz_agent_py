@@ -44,6 +44,8 @@ async def test_trigger_diagnosis_creates_durable_alert_run(monkeypatch) -> None:
             return {"id": "run-456"}
 
     monkeypatch.setattr(config, "oncall_auto_diagnosis", True)
+    monkeypatch.setattr("app.harness.monitoring.HostMonitoringRepository.get_history",
+                        lambda self, host: {"metrics": [], "logs": []})
     service = AlertService(repository_factory=lambda: FakeRepository())
     alert = _alert()
 

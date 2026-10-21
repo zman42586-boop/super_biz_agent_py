@@ -22,20 +22,54 @@
         "memory_used_gb": 31.2,
         "memory_total_gb": 32.0,
         "top_processes": [
-          {"name": "MATLAB.exe", "cpu": 20.0, "memory": 87.5}
+          {
+            "name": "MATLAB.exe",
+            "cpu": 20.0,
+            "memory": 87.5
+          }
         ]
       }
     }
   },
   "expected": {
-    "must_mention": ["内存", "OOM", "分块", "预分配", "泄漏"],
-    "should_mention": ["tall array", "clear", "动态扩容", "end+1", "checkpoint"],
-    "must_not_mention": ["栈溢出", "访问违规"]
+    "must_mention": [
+      "内存",
+      "分配",
+      "原因未确定"
+    ],
+    "should_mention": [
+      "OOM",
+      "预分配",
+      "分块",
+      "不能证明泄漏"
+    ],
+    "must_not_mention": [
+      "栈溢出",
+      "访问违规"
+    ]
   },
   "max_score": 10,
   "relevant_docs": [
     "matlab_out_of_memory_guide",
     "matlab_error_codes_reference",
     "matlab_official_memory_oom_runbook"
-  ]
+  ],
+  "data_provenance": {
+    "kind": "synthetic_fixture",
+    "real_injection_observed": false,
+    "human_relevance_review": "not_recorded",
+    "version": "evidence-boundary-v1"
+  },
+  "ground_truth": {
+    "status": "partially_observable",
+    "confirmed": [
+      "内存分配失败",
+      "内存压力"
+    ],
+    "root_cause": null,
+    "unconfirmed": [
+      "内存泄漏",
+      "动态扩容是唯一原因"
+    ]
+  }
 }

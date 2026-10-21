@@ -20,15 +20,34 @@
         "cpu_percent": 38.5,
         "memory_percent": 55.0,
         "top_processes": [
-          {"name": "MATLAB.exe", "cpu": 30.0, "memory": 15.0}
+          {
+            "name": "MATLAB.exe",
+            "cpu": 30.0,
+            "memory": 15.0
+          }
         ]
       }
     }
   },
   "expected": {
-    "must_mention": ["访问违规", "NULL", "指针", "MEX", "mexw64"],
-    "should_mention": ["my_mex", "野指针", "mxGetPr", "隔离测试"],
-    "must_not_mention": ["栈溢出", "OOM", "递归"]
+    "must_mention": [
+      "访问违规",
+      "NULL",
+      "指针",
+      "MEX",
+      "mexw64"
+    ],
+    "should_mention": [
+      "my_mex",
+      "野指针",
+      "mxGetPr",
+      "隔离测试"
+    ],
+    "must_not_mention": [
+      "栈溢出",
+      "OOM",
+      "递归"
+    ]
   },
   "max_score": 10,
   "relevant_docs": [
@@ -36,5 +55,11 @@
     "matlab_error_codes_reference",
     "matlab_mex_crash_guide",
     "matlab_official_mex_crash_runbook"
-  ]
+  ],
+  "data_provenance": {
+    "kind": "synthetic_fixture",
+    "real_injection_observed": false,
+    "human_relevance_review": "not_recorded",
+    "version": "evidence-boundary-v1"
+  }
 }

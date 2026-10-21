@@ -44,6 +44,7 @@ class AgentRun(Base):
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
     error_code: Mapped[str | None] = mapped_column(String(64))
     error_message: Mapped[str | None] = mapped_column(Text)
+    # Monotonic claim generation; ordinary writes and renewal never increment it.
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime)

@@ -5,7 +5,10 @@ MCP 客户端管理
 
 import asyncio
 import time
+from urllib.parse import urlparse
 from typing import Any
+
+import httpx
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.interceptors import MCPToolCallRequest
@@ -249,6 +252,11 @@ async def get_mcp_tools_with_circuit_breaker() -> list[Any]:
     return await _mcp_tool_provider.get_tools(get_mcp_client_with_retry)
 
 
+def _direct_local_http_client(headers=None, timeout=None, auth=None):
+    return httpx.AsyncClient(headers=headers, timeout=timeout or httpx.Timeout(30, read=300),
+                             auth=auth, follow_redirects=False, trust_env=False)
+
+
 def _create_mcp_client(
     servers: dict[str, dict[str, str]],
     tool_interceptors: list | None = None,
@@ -271,4 +279,8 @@ def _create_mcp_client(
         kwargs["tool_interceptors"] = tool_interceptors
 
     # 第一个参数是 servers 配置，直接传递
-    return MultiServerMCPClient(servers, **kwargs)  # type: ignore[arg-type]
+    connections = {name: dict(value) for name, value in servers.items()}
+    for connection in connections.values():
+        if urlparse(connection.get("url", "")).hostname in {"localhost", "127.0.0.1", "::1"}:
+            connection.setdefault("httpx_client_factory", _direct_local_http_client)
+    return MultiServerMCPClient(connections, **kwargs)  # type: ignore[arg-type]
