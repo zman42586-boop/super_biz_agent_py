@@ -60,9 +60,15 @@ class Settings(BaseSettings):
     chunk_max_tokens: int = 420
     chunk_overlap_tokens: int = 64
 
-    # MCP 服务配置 — 本机监控数据采集（CPU / 内存 / LHM 温度）
+    # MCP 是 Prometheus 的只读适配器，不采集所在机器的指标。
     mcp_monitor_transport: str = "streamable-http"
     mcp_monitor_url: str = "http://localhost:8004/mcp"
+    prometheus_url: str = "http://127.0.0.1:9090"
+    prometheus_bearer_token: str = ""
+    prometheus_timeout_sec: float = Field(default=5, gt=0, le=10)
+    prometheus_max_range_sec: int = Field(default=7200, ge=1, le=86400)
+    prometheus_max_points: int = Field(default=240, ge=2, le=1000)
+    prometheus_freshness_sec: int = Field(default=60, ge=5, le=300)
     # MCP 工具发现失败后短路降级，避免 Planner/Executor/Replanner 重复等待
     mcp_circuit_failure_threshold: int = 1
     mcp_circuit_cooldown_seconds: float = 30.0
@@ -78,16 +84,6 @@ class Settings(BaseSettings):
     # 告警 Webhook 配置
     alert_webhook_token: str = ""
 
-    # LibreHardwareMonitor 配置
-    lhm_base_url: str = "http://127.0.0.1:8085"
-    # LHM 温度传感器名称子串（AMD 等多为 CCDs Max (Tdie)，非 Intel 的 CPU Package）
-    lhm_sensor_name_contains: str = "CCDs Max (Tdie)"
-
-    # OnCall 告警规则（温度，用于本机 Agent）
-    oncall_temp_enabled: bool = False  # 温度监控开关（默认关闭，主要靠进程监控）
-    oncall_temp_threshold_c: float = 85.0  # 触发温度（°C）
-    oncall_temp_duration_sec: int = 60  # 连续超阈持续秒数
-    oncall_temp_cooldown_sec: int = 120  # 告警冷却期（秒），期间不重复发邮件
     # 心跳超时：Agent 定期上报心跳，超过此时间未收到则判定主机失联
     oncall_heartbeat_timeout_sec: int = Field(default=60, ge=1)
     oncall_heartbeat_check_interval_sec: float = Field(default=10, gt=0)
@@ -114,7 +110,7 @@ class Settings(BaseSettings):
 
     @property
     def mcp_servers(self) -> dict[str, dict[str, Any]]:
-        """获取 MCP 服务器配置（当前仅本机 Monitor MCP）"""
+        """获取 Prometheus MCP 地址；Prometheus 数据源由 MCP 进程配置。"""
         return {
             "monitor": {
                 "transport": self.mcp_monitor_transport,

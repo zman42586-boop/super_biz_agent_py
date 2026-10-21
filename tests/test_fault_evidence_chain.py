@@ -28,7 +28,7 @@ def load_functions(path, names, namespace):
 ])
 def test_actual_dump_parser_classifies_case_insensitively_and_keeps_provenance(tmp_path, text, kind):
     namespace = load_functions(ROOT / "scripts/lhm_alert_agent.py", {"parse_crash_dump"},
-                               {"os": os, "datetime": datetime, "UTC": UTC})
+                               {"os": os, "datetime": datetime, "UTC": UTC, "hashlib": __import__("hashlib")})
     path = tmp_path / "dump.txt"
     path.write_text(text + "\nStack Trace:\nf.m at line 42\n", encoding="utf-8")
     row = namespace["parse_crash_dump"](str(path))
@@ -37,22 +37,17 @@ def test_actual_dump_parser_classifies_case_insensitively_and_keeps_provenance(t
     assert row["dump_source"] == "dump.txt" and len(row["dump_sha256"]) == 64
 
 
-def test_monitor_tools_return_one_current_point_not_fabricated_history():
+def test_monitor_tools_delegate_to_prometheus_without_sampling_mcp_host():
+    expected = {"host_id": "pc", "data_source": "prometheus", "data_points": []}
+    client = Mock()
+    client.query.return_value = expected
     namespace = load_functions(ROOT / "mcp_servers/monitor_server.py",
-                               {"query_cpu_metrics", "query_memory_metrics"},
-                               {"Dict": dict, "Any": object, "Optional": __import__("typing").Optional,
-                                "datetime": datetime, "UTC": UTC,
-                                "socket": SimpleNamespace(gethostname=lambda: "real-mcp-host"),
-                                "psutil": SimpleNamespace(cpu_percent=lambda **kwargs: 42,
-                                    cpu_count=lambda **kwargs: 8,
-                                    virtual_memory=lambda: SimpleNamespace(percent=65, used=1024, total=4096)),
-                                "mcp": SimpleNamespace(tool=lambda: lambda function: function),
-                                "log_tool_call": lambda function: function})
-    for name in ("query_cpu_metrics", "query_memory_metrics"):
-        row = namespace[name]("arbitrary-label", start_time="2020-01-01 00:00:00", interval="0m")
-        assert row["host_id"] == "real-mcp-host" and row["historical_available"] is False
-        assert row["data_source"] == "current_snapshot" and len(row["data_points"]) == 1
-        assert row["observed_at"] == row["data_points"][0]["timestamp"]
+                               {"query_metrics"}, {"config": object(),
+                               "PrometheusClient": SimpleNamespace(from_settings=lambda _: client)})
+    assert namespace["query_metrics"]("pc", "cpu_percent") == expected
+    client.query.assert_called_once_with("pc", "cpu_percent", start_time=None, end_time=None, step_seconds=15)
+    client.query.side_effect = RuntimeError("Prometheus unavailable")
+    assert namespace["query_metrics"]("pc", "cpu_percent")["status"] == "error"
 
 
 def test_fault_design_is_dry_run_and_does_not_claim_actual_observations(monkeypatch):

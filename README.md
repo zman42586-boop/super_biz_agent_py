@@ -1,20 +1,20 @@
 # SuperBizAgent
 
-面向 MATLAB 桌面进程的主动轮询监控与 AIOps 诊断项目。系统持续采集 CPU、内存、温度和高占用进程；当 MATLAB 从“存在”变为“消失”时，查找最新 crash dump，把日志证据与 Milvus 知识库召回结果交给 Agent 分析，并可用独立 Judge 模型离线评估诊断报告。
+面向 MATLAB 桌面进程的监控与 AIOps 诊断项目。CPU、内存由 windows_exporter 提供，本地 Prometheus 持续抓取保存，Agent 通过 MCP 查询真实当前值和历史趋势。独立事件代理检测 MATLAB 退出、上传关键日志和 Dump 摘要，结合 Milvus 知识库诊断。温度采集及 LHM 依赖已移除。
 
 项目只保留面向告警诊断的 Plan-Execute-Replan 主链路；旧的普通多轮 RAG 聊天接口已经移除。知识库检索仍作为 AIOps Agent 的按需工具使用。
 
-> 当前定位是个人/实验环境的工程原型，不是已经接入生产监控平台的商业系统。评测数据来自 40 条可回答查询和 10 条不可回答查询，不能等同于线上真实故障准确率。
+> 当前定位是个人/实验环境的工程原型，已接入 Prometheus，但尚未完成用户真实云服务器部署。旧评测来自 40 条可回答查询和 10 条不可回答查询，不能等同于线上真实故障准确率。
 
 ## 当前能力
 
-- 主动轮询：默认每 5 秒检查目标进程，同时采集系统 CPU、内存和 Top 进程。
+- 指标监控：windows_exporter + 本地 Prometheus，默认每5秒抓取，保留15天；MCP按主机和时间查询，可选 remote_write 同步云端副本。
 - MATLAB 退出检测：只有观察到进程从存活变为消失，才触发“进程异常退出”流程；如果能找到 dump 就附带 dump，否则仍会上报退出事件。
-- 可选温度监控：通过 LibreHardwareMonitor Web API 读取温度，默认关闭，可独立开启。
-- 心跳与历史证据：独立线程默认每 5 秒发轻量 JSON；MySQL 保存主机状态和两小时内有界指标/关键日志，重启后继续检测。
+- 主机事件：默认每5秒检测进程；保留退出、Dump解析与增量日志上传，不再自行采样CPU/内存、Top进程或温度。
+- 心跳与历史证据：独立线程默认每5秒发主机存活信息；MySQL保存主机状态、关键日志及任务，连续指标历史保存在Prometheus；旧版指标心跳仍兼容。
 - 持久化诊断：进程退出创建 `alert_diagnosis`；持续失联创建 `host_down_diagnosis`，由 Harness Worker 执行已有 LangGraph。
 - Worker 恢复：运行期间周期回收租约；每次认领递增现有 `version` 作为 Fencing Token，续租及普通写入不递增；关键写入校验所有权，旧 Worker 无法覆盖接管后的状态。
-- 失联降级：实时 MCP / `search_log` 标记 unavailable，使用历史证据与 RAG，事实/检索/推断分开，原因保守标记“原因未确定”。
+- 失联降级：禁用主机实时工具和`search_log`，允许读取独立Prometheus中截止最后心跳的历史；数据源不可用时退回冻结日志/旧快照与RAG。
 - RAG 诊断：Dense 向量召回 + Milvus BM25 稀疏召回，经 RRF 融合后按置信度决定是否查询改写、重试和交叉编码重排。
 - 证据验证：原始事实和知识先登记 Evidence ID，再经确定性引用校验和独立 LLM 语义验证；只渲染验证后的结构化结论，失败时有限修正或报告“原因未确定”。
 - 分层记忆：诊断报告先写入 `memory/incidents/` 留档；LLM Judge 评估知识价值，高价值低风险案例自动入库，模糊或高风险案例转人工审核，只有 `approved` 内容能进入 Milvus 和 Planner 上下文。
@@ -25,7 +25,8 @@
 ```text
 每 5 秒轮询 MATLAB.exe
         |
-        +-- 仍存活：CPU/内存/温度/Top 进程 -> 心跳与本地快照
+        +-- 独立指标链路：windows_exporter -> 本地 Prometheus -> 可选云端副本
+        +-- 独立心跳：host -> MySQL 主机存活状态；MATLAB关键日志单独上传
         |
         `-- 上轮存活、本轮消失
                 |
@@ -37,7 +38,7 @@
                                 `-- LangGraph Planner -> Executor -> Microcompact -> Replanner -> Evidence Verifier -> Final Report
                                 |
                                 +-- Milvus 混合检索与证据置信度
-                                +-- MCP 实时指标/本地日志工具
+                                +-- Prometheus MCP 当前/历史 CPU、内存指标；冻结日志工具
                                 `-- 事实 + 证据 + 推断的诊断报告
                                         |
                                         +-- 写入分层记忆
@@ -98,7 +99,7 @@ BM25 属于召回阶段，不是重排器。它依靠词频、逆文档频率和
 | Reranker | `BAAI/bge-reranker-base`，本地运行 |
 | 向量数据库 | Milvus 2.5 + etcd + MinIO，Docker Compose |
 | Agent 编排 | LangGraph Plan-Execute-Replanner |
-| 实时工具 | MCP + psutil + LibreHardwareMonitor |
+| 指标监控 | windows_exporter 0.31.9 + Prometheus 3.15.0 + 只读 MCP |
 
 Milvus 用于同时保存 Dense、BM25 sparse、正文和 JSON metadata，并在同一数据库中执行混合检索。对于更小的 demo，也可以选 FAISS/Chroma；偏关系型业务可选 PostgreSQL + pgvector；托管场景可选 Pinecone、Weaviate、Qdrant 或云厂商向量检索。本项目保留 Milvus，是因为它直接支持当前的 Dense + Sparse + RRF 结构，也便于以后扩容。
 
@@ -115,6 +116,9 @@ Copy-Item .env.example .env
 pip install uv
 uv sync
 
+# 下载并校验官方便携监控程序，仅首次安装需要
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-monitoring.ps1
+
 docker compose -f vector-database.yml up -d
 docker compose -f vector-database.yml ps
 ```
@@ -130,13 +134,13 @@ docker compose -f vector-database.yml ps
 启动脚本默认创建 3 个独立 Harness Worker 进程，以便并行认领不同的 Run。如需调整，
 可在启动脚本前设置 `HARNESS_WORKER_COUNT`；单个 Worker 同一时刻仍只执行一个 Run。
 
-单独启动监控 Agent：
+单独启动事件代理（沿用旧文件名，不再依赖 LHM）：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\lhm_alert_agent.py
 ```
 
-常用地址：Web/API `http://localhost:9900`，Swagger `http://localhost:9900/docs`，Attu `http://localhost:8000`，Milvus `localhost:19530`。
+常用地址：Web/API `http://localhost:9900`，Swagger `http://localhost:9900/docs`，Prometheus `http://127.0.0.1:9090`，Windows Exporter `http://127.0.0.1:9182/metrics`，Attu `http://localhost:8000`，Milvus `localhost:19530`。配置、云端同步与验收见 [Prometheus 接入](docs/prometheus-monitoring.md)。
 
 ### 长期记忆审核
 
@@ -179,7 +183,8 @@ ONCALL_HISTORY_TTL_SEC=7200
 ONCALL_MONITOR_PROCESS=MATLAB.exe
 ONCALL_MONITOR_CRASH_DIR=C:\Users\YOUR_NAME\AppData\Roaming\MathWorks\MATLAB\CrashDumps
 ONCALL_MONITOR_CRASH_PATTERN=matlab_crash_dump.*
-ONCALL_TEMP_ENABLED=false
+LOCAL_PROMETHEUS_URL=http://127.0.0.1:9090
+PROMETHEUS_URL=http://127.0.0.1:9090
 ```
 
 ## 评测与验收（2026-10-20）
@@ -209,8 +214,9 @@ ONCALL_TEMP_ENABLED=false
 app/                      FastAPI、LangGraph、RAG、告警和工具代码
 aiops-docs/               MATLAB 官方摘要与公开案例知识文档
 oncall_knowledge_docs_50/ 通用 OnCall 文档
-scripts/lhm_alert_agent.py 本机主动轮询 Agent
-mcp_servers/              CPU/内存/温度 MCP 工具
+scripts/lhm_alert_agent.py 主机事件代理（沿用旧文件名）
+mcp_servers/              Prometheus 只读 MCP 工具
+monitoring/               固定版本、云端副本配置；runtime本机数据不入Git
 memory/                   历史诊断、索引摘要、工具归档与紧急快照
 tests/                    单元测试、检索评测、生成评测和场景数据
 vector-database.yml       Milvus/etcd/MinIO/Attu
@@ -220,8 +226,8 @@ vector-database.yml       Milvus/etcd/MinIO/Attu
 
 - 监控基于主动轮询，最坏检测延迟接近一个轮询周期；Agent 自身停止时依赖服务端心跳超时发现。
 - “进程消失”不等于一定崩溃，用户正常退出也可能触发；是否为 crash 仍需 dump/事件日志佐证。
-- 当前 CPU/内存主要是系统级和进程快照，不是 MATLAB 内部 profiler 指标。
-- 温度依赖 LibreHardwareMonitor；未启动其 Web Server 时不会获得温度。
+- CPU/内存是系统级Prometheus指标，不是MATLAB内部profiler；5秒抓取可能遗漏短尖峰。
+- 本地关闭后需要云端副本才能继续查询指标；remote_write最后几秒数据可能尚未送达。
 - 在线 Verifier 与生成器复用同一模型，语义判断仍有偏差；SUPPORTED 只代表当前候选通过验证，root_cause=null 时仍然没有确认根因。
 - 本地 CrossEncoder 在 CPU 上延迟较高；生产化可考虑 ONNX/量化、GPU 或更小的 reranker。
 - 知识库中的案例是公开资料整理与合成 runbook，不能替代组织自己的真实事故数据。

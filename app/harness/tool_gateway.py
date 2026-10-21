@@ -71,6 +71,8 @@ def _prepared_result(tool_name: str, result: Any) -> tuple[str, dict[str, Any] |
         content_value = content_value[0]
 
     safe_value = _safe_json(content_value)
+    if isinstance(safe_value, list) and len(safe_value) == 1 and isinstance(safe_value[0], dict):
+        safe_value = safe_value[0].get("text", safe_value)
     # MCP adapters commonly expose a JSON object as text. Parse it before
     # normalizing so monitoring snapshots retain comparable key_facts.
     if isinstance(safe_value, str):
@@ -152,10 +154,29 @@ class ToolGateway:
         if tool_name == "retrieve_knowledge" and (evidence_context or {}).get("evaluation_mode"):
             validated["source_types"] = ["official", "case", "knowledge"]
         context = get_run_context()
+        if tool_name == "query_prometheus_metrics" and context:
+            target = context.host_id or context.offline_host
+            if target and validated.get("host_id") != target:
+                raise ToolExecutionError("INVALID_ARGUMENTS", "Metric host_id must match the diagnosis host")
+            if context.offline_host:
+                from datetime import timedelta
+                from app.monitoring.prometheus import utc_datetime
+
+                cutoff = context.metrics_end_time
+                if not cutoff:
+                    raise ToolExecutionError("TOOL_UNAVAILABLE", "Offline metric query has no frozen cutoff")
+                try:
+                    end = utc_datetime(validated.get("end_time"), utc_datetime(cutoff))
+                    if end > utc_datetime(cutoff):
+                        raise ValueError("Offline metric query must end before the frozen last heartbeat")
+                    validated["end_time"] = end.isoformat()
+                    validated["start_time"] = validated.get("start_time") or (end - timedelta(minutes=10)).isoformat()
+                except ValueError as exc:
+                    raise ToolExecutionError("INVALID_ARGUMENTS", str(exc)) from exc
         if (
             context
             and context.offline_host
-            and tool_name not in {"read_host_history", "retrieve_knowledge", "get_current_time"}
+            and tool_name not in {"read_host_history", "retrieve_knowledge", "get_current_time", "query_prometheus_metrics"}
         ):
             raise ToolExecutionError("TOOL_UNAVAILABLE", f"{tool_name} unavailable: host offline")
         idempotency_key = self._idempotency_key(

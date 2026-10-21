@@ -22,6 +22,7 @@ class HarnessRunContext:
     offline_host: str | None = None
     evidence: dict | None = None
     host_id: str | None = None
+    metrics_end_time: str | None = None
 
 
 _run_context: ContextVar[HarnessRunContext | None] = ContextVar("harness_run_context", default=None)

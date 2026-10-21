@@ -1,6 +1,8 @@
 # AgentOps：质量、可靠性与可比较实验
 
-更新：2026-10-20。
+更新：2026-10-21。
+
+本轮监控数据源改为windows_exporter → Prometheus → MCP，温度已移除。查询结果逐点登记Evidence并持久化，Prometheus缺失/失败不能记成零值或正确诊断；部署与验收见[说明](docs/prometheus-monitoring.md)。
 
 ## 三类结果必须分开
 

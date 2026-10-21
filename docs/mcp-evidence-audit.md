@@ -1,40 +1,33 @@
 # MCP 与故障证据链路核查
 
-更新：2026-10-20。本轮保留 Monitor MCP，没有删除服务或替换整体接入架构。
+更新：2026-10-21。本轮已将 Monitor MCP 的本机 psutil/LHM 实现替换为 Prometheus 查询适配器，并按用户要求移除温度。原10月20日方案仅保留在历史验收记录中，不再代表当前部署方式。
 
 ## 当前存储链路
 
-| 数据 | 采集和上报 | 保存位置与限制 |
+| 数据 | 采集与上报 | 保存位置 |
 |---|---|---|
-| CPU/内存/Top 进程/可选温度 | 采集器轻量心跳 | MySQL monitored_hosts、host_evidence；默认两小时、每主机 1600 指标 |
-| MATLAB 运行日志 | 配置 MATLAB_LOG_GLOBS，增量读取关键行及上下文后 POST /api/host-logs | MySQL host_evidence；默认每主机 400 条、每条4096字符；不是完整日志备份 |
-| Crash Dump | 进程退出后扫描新修改的文本 Dump，解析类型、前3000字符与栈摘要 | 原文件仍在采集机；摘要及来源/修改时间/内容哈希/栈进入 Alert，再进入 Run 输入；未上传二进制 Dump 原文件 |
-| 本地紧急快照/日志游标 | 采集器写入 memory/emergency | 本地文件，不是云端完整历史 |
-| Agent 工具结果 | Gateway/Step/ToolCall | MySQL 有界结果、Evidence State、memory/artifacts 的超长结果 |
-| 诊断状态/报告/通知 | Harness Worker | MySQL agent_runs、步骤、事件、通知；MemorySaver 仅为进程内图缓存 |
+| CPU / 内存 | 标准 windows_exporter → 本地 Prometheus，5秒抓取 | 本地TSDB默认15天，可选remote_write到云端默认30天 |
+| 心跳存活 | 事件代理独立HTTP上报host | MySQL monitored_hosts，不为无指标心跳生成空metric记录 |
+| MATLAB运行日志 | MATLAB_LOG_GLOBS增量读取关键行及上下文 | MySQL host_evidence(log)，默认2小时、每主机400条、每条4096字符 |
+| Crash Dump | 进程退出后扫描新修改文本，保留类型/摘要/栈/来源/mtime/hash | 原文件本机保留，摘要进入Alert和Run；未上传二进制原文件 |
+| 事件时指标快照 | 退出时读取本地Prometheus，附求值时间及缺失状态 | Alert输入、Run冻结证据 |
+| 工具结果 / 诊断报告 / 通知 | Harness Worker | MySQL步骤、工具调用、Evidence状态、报告、Outbox；超长结果为本地artifact |
 
-两小时历史是 TTL 与数量限制共同作用的上限，不能承诺任意查询都拥有完整两小时记录。失联与进程退出 Run 冻结已有有界历史，随后缓存清理不删除任务快照。主机指标采样不是 MATLAB 内部 profiler，也不能证明泄漏。
+兼容旧客户端CPU/内存心跳；既有MySQL指标历史不主动删除，继续按原TTL/数量清理。新指标主存储为Prometheus。温度字段、采集和MCP工具均已移除；未删除用户自行下载的LHM程序或已有历史数据库记录。
 
-## 工具来源
+## 工具来源与约束
 
-`search_log` 查询 FastAPI 所在机器的 `logs/app_*.log`，包含文件、行号、log_id 和日志时间；它不是 MATLAB diary 工具。当前增加真实采样主机字段，避免被误当作目标主机的运行日志。
+- `query_prometheus_metrics`连接部署配置的Prometheus，按显式host_id查询CPU/内存；不读取MCP主机硬件，不允许任意URL或任意PromQL。
+- 查询检查Exporter up、样本新鲜度、主机、时间范围和返回点数。时间为PromQL求值时间，CPU是1分钟窗口rate；空数据不补零，当前值不复制成历史。
+- 每个结果点在模型摘要前登记Evidence，包含原文、主机、查询表达式、时间和哈希。当前单点不能独立证明事故根因。
+- `read_host_history`读取任务冻结的MySQL关键日志/旧指标；不发请求到故障主机。
+- `search_log`仍查询FastAPI服务机器的logs/app_*.log，不是MATLAB diary，不把云端日志当成本地机器日志。
+- 失联时只开放独立Prometheus的历史查询，截止最后心跳、host_id受Gateway强制约束。其他主机实时工具与search_log禁止。Prometheus不可用时降级，禁止编造趋势或断言物理宕机。
 
-Monitor 的 psutil 查询来自 MCP Server 所在主机。`service_name` 是兼容标签，没有按该参数选择远程主机。此前实现把当前值复制到过去时间窗口并标记 real；本轮只修正这处证据语义：返回一个当前采样、host_id、observed_at、data_source=current_snapshot、historical_available=false。过去的 start/end 参数保留为 requested_range，不能用来推断历史趋势。
+## 部署边界
 
-LHM 默认连接本机 Web Server。若显式传远程 LHM URL，其传感器实际主机仍需额外认证与映射；当前工具不能替代跨主机监控平台的身份系统。这类数据不能单独证明 MATLAB 本次根因。
+本地Exporter与Prometheus默认仅绑定回环；云端副本通过remote_write接收，示例配置默认也仅监听云端回环，需要已有受信任HTTPS认证入口。项目没有真实云服务器地址和登录信息，本轮不宣称完成用户云端发布。
 
-MATLAB 已崩溃但主机还在线时，实时资源采样只能描述崩溃后的状态；诊断应优先使用故障前历史和 Dump。主机失联时已有 available_tools/ToolGateway 明确禁用实时 MCP 和 search_log，仅保留冻结历史、RAG 和时间工具，不能连接失联主机强制修复。
+进程名/PID仍由事件代理检测；资源指标不再自行采样。Dump来源mtime仍不能严格证明与某PID生命周期关联。CPU/内存曲线不是MATLAB内部profiler，不能单独证明泄漏。没有加入自动重启、修改模型或远程修复。
 
-## 已修正的取证缺陷
-
-- Dump 类型匹配原先将文本转大写、关键词仍小写，导致 Stack Overflow 等匹配失败；现已统一大小写。
-- 采集器启动时建立 Dump 修改时间基线，减少把启动前旧文件关联到新退出事件。仍没有 OS 层 PID/进程生命周期与 Dump 的严格关联，需后续接入进程事件/文件元数据。
-- 提取栈不再只藏在终端输出；来源、修改时间、文本内容哈希和栈随告警传递。哈希针对已解码文本，不是二进制 Dump 的原始字节校验和。
-- 进程退出后的系统快照没有改称“退出前快照”；持续趋势必须来自历史心跳。
-- 检索 query 与模型摘要不登记为事实；只登记明确适配的现场和知识来源。
-
-## 后续架构建议（P1，未实施）
-
-同服务的 host_evidence 数据读取继续走 Python 服务层，不再套一层 MCP HTTP。Agent 的动态查询能力可保留为 LangGraph Tools；跨系统独立监控平台再考虑 MCP。现有 Monitor MCP 便于当前演示与独立服务接入，先保留，后续在测量调用成本、部署拓扑和身份能力之后决定是否收敛。
-
-本轮没有接入 Prometheus、集中日志平台、完整 Dump 对象存储，也没有增加自动修改 MATLAB/Simulink、进程重启或主机失联远程操作。
+部署和测试见[Prometheus接入](prometheus-monitoring.md)、[本轮验收](prometheus-migration-20261021.md)。

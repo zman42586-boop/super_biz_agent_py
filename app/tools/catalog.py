@@ -24,16 +24,15 @@ class ToolMetadata:
 
 # Self-owned tools use reviewed summaries instead of runtime LLM summarisation.
 TOOL_METADATA: dict[str, ToolMetadata] = {
+    "query_prometheus_metrics": ToolMetadata(
+        "monitoring", "按 host_id 查询 Prometheus 当前或历史 CPU、内存指标", "read"
+    ),
     "read_host_history": ToolMetadata(
         "logs", "读取失联主机故障前的历史指标和 MATLAB 关键日志", "read"
     ),
     "get_current_time": ToolMetadata("time", "查询指定时区的当前日期和时间", "read"),
     "retrieve_knowledge": ToolMetadata("knowledge", "从知识库检索相关文档和历史经验", "read"),
     "search_log": ToolMetadata("logs", "按关键词和时间范围检索本地运行日志", "read"),
-    "query_cpu_metrics": ToolMetadata("monitoring", "查询指定服务的 CPU 使用率和核数", "read"),
-    "query_memory_metrics": ToolMetadata("monitoring", "查询指定服务的内存使用情况", "read"),
-    "list_lhm_sensors": ToolMetadata("monitoring", "列出本机硬件温度传感器及实时值", "read"),
-    "get_lhm_temperature": ToolMetadata("monitoring", "查询匹配的本机硬件温度传感器", "read"),
 }
 
 DOMAIN_LABELS = {

@@ -1,6 +1,6 @@
 # SuperBizAgent 当前架构
 
-更新：2026-10-20；源码核查基线：28b4ce2。本文替换早期 v1.2.1 中已经过时的模型、Mock CLS、字符切分、空测试目录和 Redis 改造计划描述。
+更新：2026-10-21。包含 Prometheus 指标链路与温度功能移除；详细部署及验收见 [Prometheus 接入](docs/prometheus-monitoring.md)。
 
 ## 项目定位
 
@@ -10,7 +10,8 @@
 
 ```mermaid
 flowchart TD
-    C[本机采集器: 进程/系统指标/可选温度] --> HB[轻量心跳]
+    WX[Windows Exporter: CPU/内存] --> PROM[本地 Prometheus/可选云端副本]
+    C[本机事件代理: 进程/日志/Dump] --> HB[独立存活心跳]
     C --> LOG[MATLAB 关键日志增量上传]
     C --> EXIT[进程消失: 新 Dump 摘要/栈/退出后快照]
     HB --> DB[MySQL 主机状态与有界历史]
@@ -29,12 +30,13 @@ flowchart TD
     V -->|有限修正| R
     V --> F[验证报告或原因未确定]
     E --> RAG[Milvus Dense/BM25/RRF/自适应重排]
-    E --> TOOLS[历史工具/本地工具/Monitor MCP]
+    E --> TOOLS[冻结日志/本地工具/Prometheus MCP]
+    TOOLS --> PROM
     F --> RESULT[Run 报告与通知 Outbox]
     F --> MEMORY[Incident 留档与知识价值审核]
 ```
 
-失联时实时 MCP/search_log 禁用，使用冻结历史和 RAG。普通进程告警也冻结已留存的本机历史，避免只能看到退出后的瞬时指标。
+失联时禁用主机实时工具/search_log，允许从独立Prometheus查询截止最后心跳的历史；数据源不可用时仅使用冻结日志/旧快照与RAG。连续指标由Prometheus保留，任务使用的工具结果持久化到MySQL。
 
 ## 模块职责
 
@@ -47,8 +49,9 @@ flowchart TD
 | 检索 | app/services/vector_*、retrieval_* | Dense/Sparse、RRF、置信度、有限改写、CrossEncoder、Parent 展开 |
 | 文档处理 | document_preprocessing.py、document_splitter_service.py、document_identity.py | 同款预处理、H1/H2 Parent、420/64 token Child、来源与内容版本 ID |
 | 离线评测 | app/evaluation/、tests/eval_* | 候选池、人工 qrels、冻结版本、未知标签处理、旧集合回归及独立 Judge |
-| 本机采集 | scripts/lhm_alert_agent.py、app/harness/log_collector.py | psutil、可选 LHM、进程退出、Dump 摘要、日志游标与重试队列 |
-| MCP | mcp_servers/monitor_server.py | 本服务主机的当前 CPU/内存/LHM；不提供伪历史时序 |
+| 本机事件 | scripts/lhm_alert_agent.py、app/harness/log_collector.py | PID/进程名检测、独立心跳、退出、Dump摘要、日志游标与重试队列 |
+| 指标监控 | monitoring/、scripts/*monitoring*、app/monitoring/ | 标准Exporter、Prometheus时序、可选云端同步，CPU/内存无自定义采样 |
+| MCP | mcp_servers/monitor_server.py | 受限Prometheus查询，强制host_id/时间/点数，结果先登记Evidence |
 
 ## 模型与检索
 
@@ -76,7 +79,7 @@ version 是每次认领递增的 Fencing Token，续租及普通写入不递增�
 
 ## 数据边界
 
-MySQL 保存默认两小时、有容量上限的指标和 MATLAB 关键日志，不是全量日志平台。Dump 原文件仍在本机，服务端主要保存摘要、栈和可追溯元数据。search_log 是 FastAPI 本地日志；Monitor MCP 的 service_name 不选择目标主机。心跳失联只能证明服务端未收到心跳。
+MySQL保存主机状态、默认两小时有界MATLAB关键日志、旧版指标心跳兼容数据和诊断任务；Prometheus保存连续指标。Dump原文件仍在本机，服务端主要保存摘要、栈和来源。search_log是FastAPI本地日志；MCP只查Prometheus明确host_id对应的CPU/内存数据。心跳失联只能证明服务端未收到心跳。
 
 ## 测试与评测
 

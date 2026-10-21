@@ -1,0 +1,12 @@
+{
+  "prometheus": {
+    "version": "3.15.0",
+    "url": "https://github.com/prometheus/prometheus/releases/download/v3.15.0/prometheus-3.15.0.windows-amd64.zip",
+    "sha256": "5d333b385557d9adc2ff015d13da9809baccc52fb800a82d1e5c94b79258f87e"
+  },
+  "windows_exporter": {
+    "version": "0.31.9",
+    "url": "https://github.com/prometheus-community/windows_exporter/releases/download/v0.31.9/windows_exporter-0.31.9-amd64.exe",
+    "sha256": "f52bb56b02c4fec4ebfa517e1d7be31e4f5196d6d6b541cfe04a47e773060554"
+  }
+}

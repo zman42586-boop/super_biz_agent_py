@@ -6,7 +6,6 @@ DYNAMIC_TOOL_NAMES = frozenset(
         "search_log",
         "query_cpu_metrics",
         "query_memory_metrics",
-        "list_lhm_sensors",
-        "get_lhm_temperature",
+        "query_prometheus_metrics",
     }
 )

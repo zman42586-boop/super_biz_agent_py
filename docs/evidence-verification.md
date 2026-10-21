@@ -1,6 +1,6 @@
 # Evidence Verifier 与诊断状态管理
 
-更新：2026-10-20。实现入口：`app/agent/aiops/verifier.py`、`evidence.py`、`replanner.py` 和 `app/services/aiops_service.py`。
+更新：2026-10-21。实现入口：`app/agent/aiops/verifier.py`、`evidence.py`、`replanner.py` 和 `app/services/aiops_service.py`；已登记Prometheus查询的主机、求值时间、表达式与逐点原始数据。
 
 ## 状态流转
 
@@ -41,8 +41,8 @@ Replanner 不再写最终 `response`，也不向 SSE 提前发送 `final_report`
 1. `execute` 从告警 payload 及冻结主机历史登记观测字段、Dump 摘要、栈、系统快照和关键运行日志。告警名称与检测器类型不当作已确认根因。
 2. Planner 最多一次知识预取，先持久化 `prefetch_tool_calls` 预留，再执行查询；知识原始 Document 元数据保留为 artifact。
 3. ToolGateway 以 ToolCall 形式调用 `content_and_artifact` 工具，保留 Document；在截断结果之前生成 Evidence，并随成功 ToolCall 保存。Step 成功但图 checkpoint 尚未写入时，恢复可以从 Step 的 evidence 补回注册表。
-4. 普通告警也冻结已有主机历史，`read_host_history` 读取本次任务快照。主机失联时维持实时 MCP 和 `search_log` 禁用。
-5. FastAPI 日志仅标记为 API 日志；MCP 仅标记当前主机当前采样。它们不能单独证明 MATLAB 本次根因。
+4. 普通告警也冻结已有主机历史，`read_host_history`读取本次任务快照。主机失联时禁止实时主机工具和`search_log`，仅允许Prometheus查询截止最后心跳的历史，且host_id必须匹配当前任务。
+5. FastAPI日志仅标记API日志。Prometheus MCP每个指标点按主机/查询/求值时间登记；单点标记current_metric、历史标记historical_metric，不把求值时间伪称为硬件采样时间。仅当前点不能单独证明根因，历史曲线也仍需语义验证。
 
 ## 两阶段验证
 

@@ -67,9 +67,9 @@ def test_config_smtp_fields():
     assert config.smtp_host == "smtp.163.com"
     assert config.smtp_port == 465
     assert isinstance(config.smtp_user, str)
-    assert config.oncall_temp_threshold_c == 85.0
-    assert config.oncall_temp_duration_sec == 60
-    assert config.oncall_temp_cooldown_sec == 120
+    assert "oncall_temp_threshold_c" not in type(config).model_fields
+    assert config.prometheus_max_points == 240
+    assert config.prometheus_max_range_sec == 7200
 
 
 # ── 3. SMTP 发送服务（mock SMTP_SSL，不真实发送）──────────────────────
@@ -226,41 +226,9 @@ async def test_alert_service_resolve(tmp_path):
 # ── 6. LHM 传感器解析（使用 fixture JSON）─────────────────────────────
 
 
-def test_lhm_sensor_parser():
-    import sys
+def test_removed_temperature_is_not_kept_as_host_evidence():
+    from app.harness.evidence import safe_snapshot
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    from lhm_alert_agent import _find_sensors
-
-    # 模拟 LHM data.json 的树形结构
-    fixture = {
-        "Text": "Computer",
-        "Type": "Computer",
-        "Children": [
-            {
-                "Text": "AMD Ryzen 9",
-                "Type": "Cpu",
-                "Children": [
-                    {
-                        "Text": "CCDs Max (Tdie)",
-                        "Type": "Temperature",
-                        "Value": "72.3 °C",
-                        "id": "42",
-                    },
-                    {
-                        "Text": "Core #1",
-                        "Type": "Temperature",
-                        "Value": "68.1 °C",
-                        "id": "43",
-                    },
-                ],
-            }
-        ],
-    }
-
-    results: list = []
-    _find_sensors(fixture, "CCDs Max (Tdie)", results)
-
-    assert len(results) == 1
-    assert results[0]["value"] == pytest.approx(72.3)
-    assert "CCDs Max" in results[0]["name"]
+    snapshot = safe_snapshot({"cpu_percent": 32, "temperature": 72.3, "temp_threshold": 85})
+    assert snapshot["cpu_percent"] == 32
+    assert "temperature" not in snapshot and "temp_threshold" not in snapshot

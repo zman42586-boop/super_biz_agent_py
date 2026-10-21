@@ -8,6 +8,7 @@ Microcompact 只需负责卸载 raw_result，不需要理解具体业务。
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
 from typing import Any
 
 TOOL_RESULT_SCHEMA = "tool_result.v1"
@@ -77,7 +78,7 @@ def normalize_tool_result(tool_name: str, value: Any) -> dict[str, Any] | None:
         return None
 
     safe_value = {str(key): child for key, child in value.items()}
-    status = "error" if safe_value.get("error") or safe_value.get("ok") is False else "success"
+    status = "error" if safe_value.get("error") or safe_value.get("ok") is False or safe_value.get("status") in {"error", "unavailable"} else "success"
     summary_value = (
         safe_value.get("summary")
         or safe_value.get("message")
@@ -102,6 +103,10 @@ def normalize_tool_result(tool_name: str, value: Any) -> dict[str, Any] | None:
         compact = _small_fact(child)
         if compact is not None:
             key_facts[key] = compact
+    if tool_name == "query_prometheus_metrics":
+        # Timestamps changing alone must not count as new diagnostic progress.
+        values = [round(float(point["value"]), -1) for point in safe_value.get("data_points", [])]
+        key_facts["observation_signature"] = json.dumps(values)
 
     return make_tool_result(
         status=status,

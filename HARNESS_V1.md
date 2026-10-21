@@ -1,6 +1,6 @@
 # Agent Harness：持久化诊断执行
 
-更新：2026-10-20。保留现有 MySQL Harness，新增 Evidence Verifier 的 phase、计数与截止时间持久化；没有迁移到 Redis，也没有替换 LangGraph MemorySaver。
+更新：2026-10-21。保留MySQL Harness及Evidence Verifier的持久化phase、计数与截止时间；新增Prometheus历史查询的主机/截止时间约束，没有迁移Redis或替换LangGraph MemorySaver。
 
 ## 职责
 
@@ -8,7 +8,7 @@
 - agent_steps：计划步骤、执行状态、输出与原始 Evidence；支持完成后图快照未落库的恢复窗口。
 - tool_calls：参数、逻辑调用、有限尝试、结果、artifact、原始 evidence 和幂等键。
 - agent_run_events：checkpoint、步骤、调用、验证和完成事件，可重放 SSE。
-- host_evidence/monitored_hosts：有界历史和心跳状态；Run 冻结本次已有历史。
+- host_evidence/monitored_hosts：有界关键日志、旧版指标兼容数据和心跳状态；Run冻结已有历史。新连续指标由Prometheus保存，MCP结果进入ToolCall和Evidence，见[监控部署](docs/prometheus-monitoring.md)。
 - harness_notifications：报告完成与通知原子入队；SMTP 交付不确定时不盲目重发。
 
 ## 执行与恢复

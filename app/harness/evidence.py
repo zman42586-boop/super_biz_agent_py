@@ -26,7 +26,7 @@ def safe_snapshot(snapshot: dict) -> dict:
     result = {
         key: value
         for key, value in snapshot.items()
-        if key in {"cpu_percent", "memory_percent", "temperature", "temp_threshold"}
+        if key in {"cpu_percent", "memory_percent"}
         and (value is None or isinstance(value, (int, float)))
     }
     result["top_processes"] = [

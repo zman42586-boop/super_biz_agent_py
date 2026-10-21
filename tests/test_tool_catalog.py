@@ -25,9 +25,7 @@ def _tools() -> list[FakeTool]:
         FakeTool("get_current_time", "very long parameters: timezone, locale"),
         FakeTool("retrieve_knowledge", "very long retrieval schema"),
         FakeTool("search_log", "very long log schema"),
-        FakeTool("query_cpu_metrics", "very long CPU schema"),
-        FakeTool("query_memory_metrics", "very long memory schema"),
-        FakeTool("get_lhm_temperature", "very long temperature schema"),
+        FakeTool("query_prometheus_metrics", "very long metric schema"),
     ]
 
 
@@ -35,7 +33,7 @@ def test_catalog_contains_only_reviewed_name_summary_and_domain() -> None:
     catalog = format_tool_catalog(_tools())
 
     assert "[monitoring / 系统监控]" in catalog
-    assert "query_cpu_metrics: [risk=read] 查询指定服务的 CPU 使用率和核数" in catalog
+    assert "query_prometheus_metrics: [risk=read] 按 host_id 查询 Prometheus" in catalog
     assert "search_log: [risk=read] 按关键词和时间范围检索本地运行日志" in catalog
     assert "very long" not in catalog
     assert "parameters" not in catalog
@@ -48,9 +46,7 @@ def test_every_known_tool_has_a_domain() -> None:
         "get_current_time": "time",
         "retrieve_knowledge": "knowledge",
         "search_log": "logs",
-        "query_cpu_metrics": "monitoring",
-        "query_memory_metrics": "monitoring",
-        "get_lhm_temperature": "monitoring",
+        "query_prometheus_metrics": "monitoring",
     }
 
 
@@ -67,17 +63,16 @@ def test_unknown_tool_fails_closed_as_dangerous() -> None:
 def test_selection_ignores_unknown_names_and_preserves_order() -> None:
     selected = select_tools_by_name(
         _tools(),
-        ["search_log", "not_registered", "query_cpu_metrics", "search_log"],
+        ["search_log", "not_registered", "query_prometheus_metrics", "search_log"],
     )
 
-    assert [tool.name for tool in selected] == ["search_log", "query_cpu_metrics"]
+    assert [tool.name for tool in selected] == ["search_log", "query_prometheus_metrics"]
 
 
 def test_deterministic_fallback_routes_by_domain() -> None:
     selected = fallback_tool_names("检查 CPU 负载和内存指标", _tools(), max_tools=3)
 
-    assert "query_cpu_metrics" in selected
-    assert "query_memory_metrics" in selected
+    assert "query_prometheus_metrics" in selected
     assert len(selected) <= 3
 
 

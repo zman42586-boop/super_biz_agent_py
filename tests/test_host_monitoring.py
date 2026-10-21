@@ -62,7 +62,7 @@ def test_normal_loss_restart_and_recovery(tmp_path):
     run = repository.get_run(created[0])
     assert run["kind"] == "host_down_diagnosis" and run["status"] == "pending"
     assert run["input"]["host"] == "MATLAB-PC"
-    assert run["input"]["tools"]["MCP"] == "unavailable"
+    assert run["input"]["tools"]["MCP"] == "prometheus_history_only"
     assert len(run["input"]["history"]["metrics"]) == 2
     assert len(restarted.alerts(True)) == 1
     restarted.record_heartbeat("MATLAB-PC", {"cpu_percent": 20})
@@ -125,13 +125,13 @@ def test_history_limits_ttl_dedup_and_host_isolation(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_offline_tools_do_not_discover_or_invoke_mcp(tmp_path):
+async def test_offline_tools_do_not_invoke_realtime_tools_when_prometheus_discovery_fails(tmp_path):
     repository, monitor = setup(tmp_path)
-    monitor.record_heartbeat("pc", {})
+    monitor.record_heartbeat("pc", {"cpu_percent": 32})
     age(repository, "pc", 4)
     run_id = monitor.scan()[0]
     run = repository.claim_next_run("worker", 30)
-    discovery = AsyncMock(side_effect=AssertionError("Must never connect to offline MCP"))
+    discovery = AsyncMock(side_effect=ConnectionError("Independent Prometheus MCP unavailable"))
     realtime = SimpleNamespace(name="query_cpu_metrics", ainvoke=AsyncMock())
     with harness_run_context(
         HarnessRunContext(
@@ -143,7 +143,7 @@ async def test_offline_tools_do_not_discover_or_invoke_mcp(tmp_path):
         assert "evidence_id" in await read_host_history.ainvoke({})
         with pytest.raises(ToolExecutionError, match="unavailable"):
             await ToolGateway().execute(tool=realtime, arguments={})
-    discovery.assert_not_awaited()
+    discovery.assert_awaited_once()
     realtime.ainvoke.assert_not_awaited()
 
 

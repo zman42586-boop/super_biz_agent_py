@@ -38,13 +38,14 @@
 ## 主机监测与历史证据
 
 ```text
-独立轻量心跳 -> monitored_hosts + host_evidence(metric)
+独立存活心跳 -> monitored_hosts（新客户端不再上传连续指标）
+windows_exporter -> 本地 Prometheus -> 可选 remote_write 云端副本
 独立增量日志 -> POST /api/host-logs -> host_evidence(log)
 API 启动即扫描数据库中的注册主机
   30 秒无心跳：suspected_down；60 秒无心跳：down
   同一事务：失联轮次 + 即时通知 + pending 诊断 Run
 Worker -> Planner -> Executor -> Microcompact -> Replanner -> Evidence Verifier -> Final Report
-  read_host_history + RAG；实时 MCP / search_log unavailable
+  read_host_history + RAG + Prometheus失联前历史；主机实时工具/search_log unavailable
   事实 / 检索证据 / 推断 -> 原子完成 + 诊断通知
 恢复心跳 -> online，告警 resolved
 ```
@@ -57,11 +58,11 @@ Worker -> Planner -> Executor -> Microcompact -> Replanner -> Evidence Verifier 
 
 增量读取使用持久化字节游标，识别文件身份变化、轮转、截断，提取 ERROR/WARNING、错误码、异常和栈行，保留前 3 行及后 5 行上下文。游标和脱敏队列存于 memory/emergency/matlab_log_cursor.json。失败保留稳定 event_id，重启可重试；云端唯一键避免重传重复，上传确认后移除。默认每 2 秒上传，每轮最多读 64 KiB/8 文件，重试队列最多 128 条/256 KiB，参数见 .env.example。极长未结束行可能跳过，队列溢出丢最旧内容，dropped 记录队列丢弃数；它不是完整日志备份。
 
-普通心跳不传完整日志。云端默认保留接收 UTC 时间最近 7200 秒，每主机独立最多 1600 指标/400 日志，每日志 4096 字符，每批内容 64 KiB/100 条；ONCALL_HISTORY_* 可配置。写入和周期扫描清理，离线主机也清理，查询过滤 TTL。采集器 ts 仅为辅助时间。Run 冻结有界证据，任务审计快照和通知不随缓存 TTL 删除，长期使用需要 Run/通知归档策略。工具和 Prompt 会对历史采样，完整有界历史存于任务输入。
+普通心跳不传日志或连续指标。云端MySQL默认保留接收UTC时间最近7200秒的关键日志，每主机最多400条，每条4096字符，每批64KiB/100条；仍兼容最多1600条旧版指标心跳，ONCALL_HISTORY_*可配置。持续CPU/内存历史由Prometheus保留，本地默认15天、云端示例30天。任务审计快照与工具证据不随缓存TTL删除，长期使用需要Run/通知归档策略。详见[指标监控部署](prometheus-monitoring.md)。
 
 脱敏覆盖常见密钥、Bearer、SMTP 密码、邮箱、用户路径，无法识别所有敏感业务内容。只上传获准日志，使用受信任网络/TLS；共享 Webhook Token 不提供每主机独立身份认证。
 
-Planner/Executor/Replanner 跳过 MCP 发现；Tool Gateway 只允许历史、知识检索和时间工具。云端 search_log 不作为该主机证据。报告分服务端事实、实际检索记录和未验证的模型分析，心跳无法确认物理状态，保守输出“原因未确定”。模型断言过滤只是辅助检查，不能替代内容评估。
+Planner/Executor/Replanner在失联时仅保留Prometheus历史MCP，屏蔽其他实时工具。ToolGateway强制本次host_id，查询不晚于冻结的最后心跳；缺少截止时间直接拒绝，数据源不可用则退回冻结日志/旧快照。云端search_log不作为该主机证据。心跳失联无法确认物理状态，证据不足输出“原因未确定”。
 
 ## 验收与限制
 

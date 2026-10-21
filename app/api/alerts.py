@@ -95,10 +95,8 @@ class HeartbeatRequest(BaseModel):
     """Agent 心跳上报：轻量系统指标，日志通过独立接口上传。"""
 
     host: str = Field(min_length=1, max_length=128, description="主机名，用于标识上报来源")
-    temperature: float | None = Field(default=None, description="当前温度 (°C)")
-    temp_threshold: float | None = Field(default=None, description="告警阈值 (°C)")
     recent_points: list = Field(
-        default_factory=list, max_length=10, description="最近温度数据点 [[ts, val], ...]"
+        default_factory=list, max_length=10, description="旧版指标数据点；新客户端不再通过心跳上传指标"
     )
     cpu_percent: float | None = Field(default=None, description="当前 CPU 使用率 %")
     memory_percent: float | None = Field(default=None, description="当前内存使用率 %")
@@ -106,7 +104,7 @@ class HeartbeatRequest(BaseModel):
         default_factory=list, max_length=5, description="TOP 进程列表 [{name, cpu, memory}, ...]"
     )
     critical_snapshot: dict | None = Field(
-        default=None, description="温度危险时的完整系统快照 (CPU/内存/进程)"
+        default=None, description="旧版系统快照；新客户端在退出事件中附带 Prometheus 查询结果"
     )
 
 

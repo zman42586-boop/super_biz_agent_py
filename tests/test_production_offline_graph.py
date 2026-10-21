@@ -43,7 +43,7 @@ async def test_production_planner_executor_replanner_offline(tmp_path, monkeypat
     planner = importlib.import_module("app.agent.aiops.planner")
     executor = importlib.import_module("app.agent.aiops.executor")
     replanner = importlib.import_module("app.agent.aiops.replanner")
-    discovery = AsyncMock(side_effect=AssertionError("Offline host must never be contacted"))
+    discovery = AsyncMock(side_effect=ConnectionError("Independent Prometheus MCP unavailable"))
     for module in [planner, executor, replanner]:
         monkeypatch.setattr(module, "get_mcp_tools_with_circuit_breaker", discovery)
     monkeypatch.setattr(
@@ -109,4 +109,4 @@ async def test_production_planner_executor_replanner_offline(tmp_path, monkeypat
     assert "## 已观测事实" in run["final_report"] and "## 检索证据" in run["final_report"]
     assert "## 分析推断" in run["final_report"]
     assert archive.await_args.kwargs["report"] == run["final_report"]
-    discovery.assert_not_awaited()
+    assert discovery.await_count >= 1

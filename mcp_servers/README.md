@@ -1,80 +1,29 @@
-# MCP Servers
+# Prometheus MCP
 
-更新：2026-10-20。
+更新：2026-10-21。
 
-本目录只保留诊断取证类 MCP 服务。主动 OnCall 检测由 `scripts/lhm_alert_agent.py`
-负责，温度/进程监控在同一主机运行；日志检索为 FastAPI 本地工具 `app/tools/log_tool.py`。
+`monitor_server.py` 已替换为 Prometheus HTTP API 的只读适配器，端口仍为 `8004`，地址 `http://127.0.0.1:8004/mcp`。不再调用 psutil，不提供 LHM、温度或旧的 `query_cpu_metrics` / `query_memory_metrics` 工具。
 
-## 服务列表
+唯一工具是 `query_prometheus_metrics`：
 
-### Monitor Server (`monitor_server.py`)
-
-监控数据服务，端口 `8004`，MCP 地址：
-
-```bash
-http://localhost:8004/mcp
+```json
+{
+  "host_id": "实际Windows主机名",
+  "metric": "memory_percent",
+  "start_time": "2026-10-21T01:00:00Z",
+  "end_time": "2026-10-21T01:10:00Z",
+  "step_seconds": 15
+}
 ```
 
-核心工具：
+支持 `cpu_percent`、`memory_percent`、`memory_total_bytes`、`memory_available_bytes`。不提供任意 PromQL 或动态数据源 URL，默认最多两小时、240点，UTC 时间必须携带时区。CPU 通过 windows_exporter 的 idle counter 在一分钟窗口计算 rate；内存通过 available / physical_total 计算。
 
-- `query_cpu_metrics`：查询MCP Server所在主机的当前CPU，只有一个真实采样点，不生成历史趋势
-- `query_memory_metrics`：查询MCP Server所在主机当前内存，不以当前值回填过去时间窗口
-- `list_lhm_sensors`：读取 LibreHardwareMonitor 温度传感器列表
-- `get_lhm_temperature`：查询匹配传感器的当前温度
+指标同时检查目标 host_id、exporter up 和 up 样本新鲜度；缺失、失效、非法范围不会回退到 MCP 机器采样。返回时间为 PromQL 求值时间，不宣称是每个原始采样的硬件读取时间，不补零或制造历史。单点和历史结果有不同证据类型，数据在模型压缩前进入 Evidence 注册表。
 
-## 启动
+Agent 自动告警任务的 host_id 受 ToolGateway 限制。主机失联时仍禁止本机实时工具和 search_log，只允许查询独立 Prometheus 中截止最后心跳的历史；未配置云端副本时，本地电脑失联可能同时导致指标历史不可查询，此时降级为 MySQL 日志/旧快照与知识检索，不能声称已获得 Prometheus 证据。
 
-推荐使用项目根目录的 Windows 脚本：
+本地事件代理直接使用 `LOCAL_PROMETHEUS_URL`；MCP 独立进程使用 `PROMETHEUS_URL`，云端部署时后者指向云端副本。启动、远程同步、安全入口与测试见 [Prometheus 部署说明](../docs/prometheus-monitoring.md)。
 
-```bat
-start-windows.bat
+```powershell
+.\.venv\Scripts\python.exe mcp_servers/monitor_server.py
 ```
-
-手动启动 Monitor MCP：
-
-```bash
-python mcp_servers/monitor_server.py
-```
-
-## AIOps 诊断分工
-
-```text
-主动检测层: scripts/lhm_alert_agent.py (温度 + 进程监控)
-告警入口:   POST /api/alerts/ingest
-诊断取证:   Monitor MCP + 本地工具
-通知输出:   SMTP 邮件
-```
-
-Agent 诊断时可调用：
-
-```python
-query_cpu_metrics(service_name="local-host")
-query_memory_metrics(service_name="local-host")
-get_lhm_temperature()
-```
-
-本地日志由 `search_log` 工具提供，不再通过 CLS MCP：
-
-```python
-search_log(query="error timeout", minutes=60, limit=100)
-```
-
-## 参考资料
-
-- [FastMCP 文档](https://github.com/jlowin/fastmcp)
-- [MCP 协议](https://modelcontextprotocol.io/)
-- [LangGraph 文档](https://langchain-ai.github.io/langgraph/)
-- [主项目 README](../README.md)
-
----
-
-注意：MCP 工具是被 Agent 调用的诊断取证接口；主动 OnCall 检测不由 MCP
-承担，而由 `lhm_alert_agent.py` 或外部告警系统触发。
-
-## 证据来源约束
-
-CPU/内存返回host_id、observed_at、data_source=current_snapshot、historical_available=false。service_name只是兼容标签，不能选择目标主机；start/end仅返回在requested_range，不提供历史数据。故障前历史使用read_host_history读取MySQL中冻结的主机证据。
-
-LHM使用远程URL时不猜测实际host_id，不能将采集服务主机误当成传感器主机。主机失联时实时MCP和search_log全部禁用；search_log查询FastAPI日志，不是MATLAB运行日志。缺少主机、事件时间或有效来源的数据不能单独支持根因。
-
-本轮保留MCP服务；同服务数据库读取、跨系统接入和后续取舍见 [数据链路核查](../docs/mcp-evidence-audit.md)。

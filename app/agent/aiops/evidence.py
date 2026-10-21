@@ -100,6 +100,9 @@ def tool_evidence(tool_name: str, result: Any, context: dict) -> list[dict]:
     # Other tools need their own reviewed adapter. In particular MCP "real"
     # snapshots lacking a host and sample time cannot support this incident.
     value = getattr(result, "content", result)
+    if isinstance(value, list) and len(value) == 1:
+        block = value[0]
+        value = block.get("text", block) if isinstance(block, dict) else getattr(block, "text", block)
     if isinstance(value, str):
         try:
             value = json.loads(value)
@@ -107,12 +110,27 @@ def tool_evidence(tool_name: str, result: Any, context: dict) -> list[dict]:
             return []
     if not isinstance(value, dict):
         return []
-    if value.get("status") == "error" or value.get("error"):
+    if value.get("status") in {"error", "unavailable"} or value.get("error"):
         return []
     raw = value.get("raw_result", value)
     if not isinstance(raw, dict):
         return []
     evidence = []
+    if tool_name == "query_prometheus_metrics" and raw.get("data_source") == "prometheus":
+        host = raw.get("host_id")
+        if not host or (context.get("host_id") and host != context["host_id"]):
+            return []
+        for point in raw.get("data_points", []):
+            if not point.get("timestamp"):
+                continue
+            text = json.dumps({"host_id": host, "metric": raw.get("metric_name"),
+                               "timestamp_basis": raw.get("timestamp_basis"), **point}, ensure_ascii=False)
+            evidence.append(make_evidence(kind="incident_fact",
+                             source_type="historical_metric" if raw.get("historical_available") else "current_metric",
+                             source="prometheus:" + str(raw.get("metric_name")),
+                             locator=f"promql:{raw.get('query')};evaluation:{point['timestamp']}",
+                             text=text, context={"run_id": context.get("run_id", ""), "host_id": host},
+                             event_time=point["timestamp"], time_basis="observed"))
     if tool_name == "search_log":
         for row in raw.get("logs", []):
             evidence.append(make_evidence(kind="incident_fact", source_type="api_log",
@@ -120,7 +138,7 @@ def tool_evidence(tool_name: str, result: Any, context: dict) -> list[dict]:
                              text=row["message"], context={"run_id": context.get("run_id", ""),
                                                         "host_id": raw.get("host_id", "")},
                              event_time=row.get("timestamp"), time_basis="observed"))
-    if tool_name in {"query_cpu_metrics", "query_memory_metrics", "get_lhm_temperature"}:
+    if tool_name in {"query_cpu_metrics", "query_memory_metrics"}:
         if raw.get("host_id") and raw.get("observed_at") and raw.get("data_source") == "current_snapshot":
             evidence.append(make_evidence(kind="incident_fact", source_type="current_metric",
                              source=f"mcp:{tool_name}", locator="/current_snapshot",

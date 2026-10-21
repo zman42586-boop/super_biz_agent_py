@@ -86,6 +86,7 @@ tests/.last_eval_score
 
 # Local evaluation reports and scratch scripts
 work/
+/monitoring/runtime/
 
 # Local diagnostic evidence can contain sensitive host data
 /memory/artifacts/

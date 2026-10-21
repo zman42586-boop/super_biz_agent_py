@@ -13,7 +13,7 @@ def format_host_report(run, generated, repository):
         f"- 最后心跳（服务端 UTC）：{payload['last_heartbeat_at']}",
         f"- 云端观察：超过失联阈值未收到心跳；事件轮次 {payload['outage_seq']}。",
         f"- 故障前留存 {len(metrics)} 条指标、{len(logs)} 条关键日志。",
-        "- 实时 MCP / search_log：unavailable，本次未连接失联主机。",
+        "- 实时主机工具 / search_log：unavailable；仅允许查询独立 Prometheus 的失联前历史，本次不连接失联主机。",
     ]
     for row in metrics[-3:] + logs[-5:]:
         facts.append(

@@ -86,10 +86,11 @@
     <div class="mermaid">
 flowchart LR
   subgraph L1["① 监控采集层 · 独立进程"]
-    LHM["LibreHardwareMonitor<br/>温度 Web API :8085"]
     POLL["lhm_alert_agent.py<br/>每 5s 轮询 MATLAB.exe"]
     CRASH["扫描 Crash Dump<br/>异常类型 / 调用栈"]
-    MCP["MCP Monitor Server :8004<br/>CPU / 内存 / 温度工具"]
+    WX["windows_exporter :9182<br/>CPU / 内存"]
+    PROM["本地 Prometheus :9090<br/>时序存储 / 可选云端同步"]
+    MCP["Prometheus MCP :8004<br/>指定主机和时间的指标查询"]
   end
 
   subgraph L2["② 接入层 · FastAPI :9900"]
@@ -115,10 +116,11 @@ flowchart LR
     SSE["SSE 流式前端"]
   end
 
-  LHM -->|读温度| POLL
-  POLL -->|心跳 + 快照| HB
+  WX -->|5秒抓取| PROM
+  MCP -->|PromQL| PROM
+  POLL -->|独立存活心跳| HB
   POLL -->|进程消失| CRASH
-  POLL -->|温度 / 退出告警| INGEST
+  POLL -->|进程退出告警| INGEST
   CRASH -->|携带 dump| INGEST
   RUNS --> HARN
   HARN -->|认领 / 恢复| GRAPH
@@ -139,7 +141,7 @@ flowchart LR
   classDef magentaNode fill:#f8e5eb,stroke:#e87ba4,stroke-width:1.5px,color:#0b0b0b
   classDef greenNode fill:#cfe6ce,stroke:#008300,stroke-width:1.5px,color:#0b0b0b
 
-  class LHM,POLL,CRASH,MCP blueNode
+  class WX,PROM,POLL,CRASH,MCP blueNode
   class HB,INGEST,RUNS,CHAT orangeNode
   class HARN,GRAPH aquaNode
   class MILVUS,BGE yellowNode
@@ -150,13 +152,13 @@ flowchart LR
   <!-- ============ 2. 告警链路 ============ -->
   <section class="chart-card">
     <h2>2 · 监控与告警链路（lhm_alert_agent）</h2>
-    <p class="caption">"进程消失"不等于崩溃——正常退出也会触发，是否为 crash 由 dump / 事件日志佐证。防误触发靠：连续超阈 60s、冷却 120s、SHA-1 去重、warning 不诊断。</p>
+    <p class="caption">进程消失不等于崩溃，需由Dump或日志佐证。CPU/内存由Exporter和Prometheus提供，心跳独立于指标可用性；本轮不采集温度。</p>
     <div class="mermaid">
 flowchart TD
   TICK([每 5 秒轮询 MATLAB.exe])
-  SAMPLE["采集 psutil CPU / 内存<br/>LHM 温度 · Top 进程"]
+  SAMPLE["只检测目标进程身份<br/>指标交给Exporter / Prometheus"]
   DEC1{上轮存活<br/>本轮消失?}
-  HB2["心跳 /api/heartbeat<br/>+ 本地快照"]
+  HB2["独立心跳 /api/heartbeat<br/>不依赖指标采集"]
   DUMP["扫描最新 crash dump<br/>解析异常类型 / 调用栈 / 错误行"]
   SEND["POST /api/alerts/ingest<br/>Bearer Token"]
   DEDUP{"去重<br/>SHA-1 host+sensor"}
@@ -165,7 +167,7 @@ flowchart TD
   AUTO{"critical 且<br/>AUTO_DIAGNOSIS 开启?"}
   DIAG["AIOps 自动诊断<br/>→ 诊断报告邮件"]
   NOOP["仅告警，不诊断"]
-  NOTE1["防误触发<br/>连续超阈 60s · 冷却 120s<br/>warning 不触发诊断"]
+  NOTE1["证据约束<br/>进程消失不等于崩溃<br/>指标缺失不补零"]
 
   TICK --> SAMPLE --> DEC1
   DEC1 -- 否 --> HB2 --> TICK

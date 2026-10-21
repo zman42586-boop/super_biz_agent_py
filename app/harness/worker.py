@@ -101,6 +101,7 @@ class HarnessWorker:
             (run.get("input") or {}).get("host") if offline else None,
             (run.get("input") or {}).get("history"),
             (run.get("input") or {}).get("host") or ((run.get("input") or {}).get("alert") or {}).get("host"),
+            (run.get("input") or {}).get("last_heartbeat_at"),
         )
         heartbeat_stop, lost = asyncio.Event(), asyncio.Event()
         with harness_run_context(context):
